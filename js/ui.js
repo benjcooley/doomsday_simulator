@@ -228,14 +228,18 @@ export class UI {
     mkVS('Heat drama', 'heatMul', 0.2, 4, 0.1);
     mkVS('Cooling rate', 'coolMul', 0, 20000, 100);
     mkVS('Star brightness', 'starBoost', 0, 1.5, 0.05);
+    // particle-density dial: continuous count, applied on release (changing it rebuilds bodies)
     const qRow = this._el('div', 'srow', vw);
-    this._el('span', 'slabel', qRow, 'PARTICLES');
-    this.qSel = this._el('select', 'lab-sel inline', qRow);
-    for (const [label, n] of [['Low (8k)', 8192], ['Medium (16k)', 16384], ['High (32k)', 32768], ['Ultra (42k)', 42000]]) {
-      this.qSel.add(new Option(label, n));
-    }
-    this.qSel.value = String(this.sim.quality);
-    this.qSel.addEventListener('change', () => this.cb.setQuality(parseInt(this.qSel.value)));
+    this._el('span', 'slabel', qRow, 'DENSITY');
+    const qOut = this._el('span', 'sval', qRow, '');
+    this.qDial = this._el('input', 'slider', qRow);
+    this.qDial.type = 'range'; this.qDial.min = 4000; this.qDial.max = 48000; this.qDial.step = 1000;
+    this.qDial.value = this.sim.quality;
+    this.qDial.title = 'Particle count — higher = finer detail, slower. Rebuilds on release.';
+    const fmtQ = (n) => (n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : n);
+    qOut.textContent = fmtQ(this.sim.quality);
+    this.qDial.addEventListener('input', () => { qOut.textContent = fmtQ(parseInt(this.qDial.value)); });
+    this.qDial.addEventListener('change', () => this.cb.setQuality(parseInt(this.qDial.value)));
 
     // ---- HUD ----
     const hud = this._el('div', 'hud');

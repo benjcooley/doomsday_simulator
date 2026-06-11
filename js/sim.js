@@ -4,6 +4,7 @@ import { dateToJD, gmst, planetPos, planetVel, moonGeo, moonGeoVel, orbitPolylin
 import { CATALOG, IMPACTORS, impactorMass, POP_2026, RECIPES } from './bodies.js';
 import { buildBlob } from './blob.js';
 import { getScenario } from './scenarios.js';
+import { FILLER } from './headlines.js';
 import { vadd, vsub, vscale, vnorm, vcross, vlen, vdot, clamp, lerp, curve } from './mathx.js';
 
 const J2000 = 2451545.0;
@@ -54,6 +55,9 @@ export class Sim {
     this.mirror = [];
     this.contacts = new Set();
     this.events = (def.headlines || []).map((h) => ({ ...h, fired: false }));
+    this._fillerSeen = new Set();
+    this._fillerT = 0;
+    this._approachFired = false;
     this.cumImpactJ = 0;
     this.thermalJ0 = null;
     this.pop = POP_2026;
@@ -515,6 +519,7 @@ export class Sim {
         if (this.simTime - this._firstContactT > parseFloat(ev.cond.slice(6))) this._fire(ev);
       }
     }
+    this._fillerHeadlines(dtWall);
 
     // atmospheric heat reservoir: impacts dump a slice of their energy into the air, which
     // bakes the whole surface (the K-Pg global-broil mechanism) and radiates away over days
@@ -689,7 +694,34 @@ export class Sim {
     this.energyDisplay = Math.max(this.cumImpactJ, s ? Math.max(0, s.thermalJ - (this.thermalJ0 || 0)) : 0);
   }
 
+  // rotating absurd-news ticker, fired on a wall-clock cadence and chosen by doom phase
+  _fillerHeadlines(dtWall) {
+    this._fillerT = (this._fillerT || 0) + dtWall;
+    const period = this.killTarget > 0.05 ? 7 : 11;   // crank up the panic during carnage
+    if (this._fillerT < period || this.headlineQueue.length > 1) return;
+    this._fillerT = 0;
+    let phase = 'calm';
+    if (this.pop <= 0 || this.killTarget > 0.92) phase = 'aftermath';
+    else if (this.killTarget > 0.04) phase = 'doom';
+    else if (this.dissolveGo || this.contacts.size > 0 || this._approachFired) phase = 'panic';
+    const pool = FILLER[phase];
+    if (!this._fillerSeen) this._fillerSeen = new Set();
+    let pick = pool[Math.floor(this._rng() * pool.length)];
+    for (let i = 0; i < 4 && this._fillerSeen.has(pick); i++) pick = pool[Math.floor(this._rng() * pool.length)];
+    if (this._fillerSeen.has(pick)) return;            // pool exhausted this phase
+    this._fillerSeen.add(pick);
+    this.headlineQueue.push(pick);
+  }
+
+  _rng() {
+    // deterministic-ish PRNG (no Math.random — keeps the sim reproducible)
+    this._rngS = ((this._rngS || (this.frame * 2654435761)) ^ (this.frame << 13)) >>> 0;
+    this._rngS = (this._rngS * 1664525 + 1013904223) >>> 0;
+    return this._rngS / 4294967296;
+  }
+
   _fire(ev) {
+    if (ev.cond === 'approach') this._approachFired = true;
     ev.fired = true;
     this.headlineQueue.push(ev.text);
   }
