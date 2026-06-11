@@ -219,6 +219,7 @@ export class UI {
     mkToggle('Labels', 'labels');
     mkToggle('Asteroid belt', 'belt');
     mkToggle('Cinematic auto-framing', 'autoFrame');
+    mkToggle('Impact ejecta (beta)', 'ejecta');
     mkToggle('Force particle view', 'forceParticles');
     const mkVS = (label, key, min, max, step) => {
       const row = this._el('div', 'srow', vw);

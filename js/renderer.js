@@ -1,5 +1,6 @@
 // renderer.js — render graph: scene (MSAA HDR) → bloom chain → ACES composite
 import { STARS_WGSL, SPHERE_WGSL, CORONA_WGSL, RING_WGSL, GLOBE_WGSL, PARTICLES_WGSL, LINES_WGSL, BELT_WGSL } from './shaders_render.js';
+import { EJECTA_RENDER_WGSL } from './ejecta.js';
 import { POST_WGSL } from './shaders_post.js';
 import { mmul, mlookAt, mperspectiveRevZ, vsub, vadd, vnorm, vcross, mtransformPoint } from './mathx.js';
 import { CATALOG } from './bodies.js';
@@ -145,6 +146,7 @@ export class Renderer {
     this.pClouds = await mk('clouds', GLOBE_WGSL, 'vs', 'fsClouds', { ds: dsBlend, blend: premul, verts: sphereVerts, cull: 'back' });
     this.pAtmo = await mk('atmo', GLOBE_WGSL, 'vs', 'fsAtmo', { ds: dsBlend, blend: additive, verts: sphereVerts, cull: 'front' });
     this.pParts = await mk('particles', PARTICLES_WGSL, 'vs', 'fs', { ds: dsOpaque, topo: 'triangle-strip' });
+    this.pEjecta = await mk('ejecta', EJECTA_RENDER_WGSL, 'vs', 'fs', { ds: dsBlend, blend: additive, topo: 'triangle-strip' });
     this.pLines = await mk('lines', LINES_WGSL, 'vs', 'fs', { ds: dsBlend, blend: premul, topo: 'line-strip', verts: lineVerts });
     this.pBelt = await mk('belt', BELT_WGSL, 'vs', 'fs', { ds: dsBlend, blend: additive });
 
@@ -384,6 +386,21 @@ export class Renderer {
         ],
       }));
       pass.draw(4, this.ps.activeN);
+    }
+
+    // impact ejecta (tiny additive motes) — drawn after the opaque particles, before the globe blend
+    if (this.ejecta && this.ejecta.active > 0 && scene.showEjecta) {
+      pass.setPipeline(this.pEjecta);
+      pass.setBindGroup(0, this._bg('f-ejecta', this.pEjecta, { list: [{ binding: 0, resource: { buffer: this.frameBuf } }] }));
+      pass.setBindGroup(1, this._bg('ejecta1', this.pEjecta, {
+        group: 1, list: [
+          { binding: 0, resource: { buffer: this.ejecta.renderU } },
+          { binding: 1, resource: { buffer: this.ejecta.pos } },
+          { binding: 2, resource: { buffer: this.ejecta.vel } },
+          { binding: 3, resource: { buffer: this.ejecta.col } },
+        ],
+      }));
+      pass.draw(4, this.ejecta.active);
     }
 
     // ---- blended ----

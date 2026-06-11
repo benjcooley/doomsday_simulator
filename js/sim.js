@@ -23,7 +23,7 @@ export class Sim {
     this.autoSlow = true;
     this.view = {
       clouds: true, atmo: true, cityLights: true, orbits: true, trails: true,
-      labels: true, belt: true, forceParticles: false, autoFrame: true,
+      labels: true, belt: true, forceParticles: false, autoFrame: true, ejecta: false,
       bloom: 0.18, exposure: 1.0, coolMul: 2500, heatMul: 1.0, starBoost: 0.7,
     };
     this.maxSub = 10;          // adaptive substep budget (performance governor)
@@ -82,6 +82,7 @@ export class Sim {
     this.settleUntil = 1800;
     this.renderer.clearTrails();
     this.renderer.clearGhosts();
+    this.ejecta?.reset();
     this.renderer.writeAim(new Float32Array(0), 0);
     this.trails = [];
     this.settleUntil = 3600;
@@ -419,19 +420,20 @@ export class Sim {
         dtSubMax = clamp((minGap - WAKE * gapSumR) / closing, 2, 1200);
       }
     } else {
-      dtSubMax = dtCap;
-      // Anti-tunnel: a fast impactor must never advance more than ~0.4 of a particle radius per
-      // substep, or it threads between particles and passes through with no momentum transfer.
-      // Gated on APPROACH (closing > 0) so it holds through the whole collision while the Lance is
-      // still plowing in, then releases the instant the remnant decelerates or recedes (closing
-      // drops) — that natural relaxation is what returns the sim to normal timesteps afterward.
-      if (closing > 0.05 && minGap < 50 * gapSumR) {
-        dtSubMax = clamp((0.4 * this.ps.minRp) / closing, 1e-5, dtCap);
+      // Drive dt by the fastest body motion near Earth. Using a body's SPEED (not the closing
+      // rate, which flips sign at Earth's centre) keeps a penetrator at a fine timestep through
+      // its WHOLE traversal — it cannot tunnel out the back half without depositing its energy.
+      // CRITICAL: gated PER BODY on that body's OWN distance — a 0.4c slug 80,000 Mm out must
+      // not pin the whole sim to microsecond steps before it even arrives.
+      let vMax = 0;
+      for (let j = 1; j < this.mirror.length; j++) {
+        const b = this.mirror[j];
+        if (b.consumed) continue;
+        const sumRj = this.mirror[0].R + b.R;
+        const gapJ = vlen(vsub(b.pos, this.mirror[0].pos)) - sumRj;
+        if (gapJ < 50 * sumRj) vMax = Math.max(vMax, vlen(vsub(b.vel, this.mirror[0].vel)));
       }
-      // post-contact impact hold: keep the collision resolving at extra-fine substeps for a while
-      if (this._impactHold && this.simTime < this._impactHold.until) {
-        dtSubMax = Math.min(dtSubMax, this._impactHold.dt);
-      }
+      dtSubMax = vMax > 0.05 ? clamp((0.4 * this.ps.minRp) / vMax, 1e-5, dtCap) : dtCap;
     }
     // Particle-sim workload is DECOUPLED from the slider: live collision physics runs a small
     // FIXED substep budget per frame (smooth at any warp), so the slider can't pile up O(N²)
@@ -451,6 +453,7 @@ export class Sim {
     const simDt = dtSub * substeps;
     this.warpEff = simDt / dtWallSim;
     this.simTime += simDt;
+    this._lastSimDt = simDt;
     this.disturbedNow = disturbed;
 
     // settle boost decay
@@ -510,20 +513,12 @@ export class Sim {
           const mu = (a.M * b.M) / (a.M + b.M);
           const E = 0.5 * mu * vrel * vrel * 1e36;
           this.cumImpactJ += E;
-          // IMPACT HOLD: a fast impactor hits thousands of particles over its whole traversal —
-          // hold extra-fine substeps for a window AFTER contact so the full blast/ejecta develops
-          // instead of the timestep ballooning and the slug tunnelling through. Window ≈ time to
-          // plough ~50 combined-radii at the impact speed; finer dt for faster hits.
-          if (vrel > 0.06) {
-            this._impactHold = {
-              until: this.simTime + Math.min(8, 50 * (a.R + b.R) / vrel),
-              dt: Math.max(1e-5, Math.min(2, 0.18 * this.ps.minRp / vrel)),
-            };
-          }
           this._fireCond('contact');
           if (a.name === 'Earth' || b.name === 'Earth') {
             this.dissolveGo = true;
             this.banner = { text: `IMPACT — ${(b.name === 'Earth' ? a.name : b.name)} · ${(vrel * 1000).toFixed(1)} km/s · ${this._fmtEnergy(E)}`, kind: 'danger', until: performance.now() + 9000 };
+            const earth = a.name === 'Earth' ? a : b, imp = a.name === 'Earth' ? b : a;
+            this._spawnEjecta(earth, imp, vrel, E);
           }
         }
       }
@@ -620,7 +615,7 @@ export class Sim {
         // drift + spin), so its surface can't drift off and a coarse low-density blob can't shed
         // its skin. The instant a real impact arms heat, the drag releases and physics splashes
         // it freely. This replaces the old fixed settle window — calm planets just hold their shape.
-        settleDrag: this._heatArmed ? 0 : 1 / 60,
+        settleDrag: (this._heatArmed || this.contacts.size > 0) ? 0 : 1 / 60,
         consumedMask: this.consumedMask || 0,
       });
       out.substeps = substeps;
@@ -917,6 +912,23 @@ export class Sim {
     return gi > 0;
   }
 
+  // Spawn an impact ejecta curtain from the surface point under the impactor. Count scales with
+  // impact energy (cube-root → excavated-mass-ish), so Chicxulub gets a modest spray and the Lance
+  // a planet-shrouding fountain. Earth-centred frame; the ejecta pool integrates ballistically.
+  _spawnEjecta(earth, imp, vrel, E) {
+    if (!this.ejecta || !this.view.ejecta) return;
+    // Crater regime only. Once the impact approaches Earth's gravitational binding energy
+    // (~2.2e32 J) the whole planet disperses — the DEM particle burst IS the effect, and an
+    // ejecta crater-curtain would be nonsense. Planet-killers (Lance, Theia, Jupiter…) eject nothing.
+    if (E > 2e31) return;
+    const d = vsub(imp.pos, earth.pos), dl = vlen(d) || 1;
+    const normal = [d[0] / dl, d[1] / dl, d[2] / dl];
+    const R = CATALOG.earth.R;
+    const point = [normal[0] * R, normal[1] * R, normal[2] * R];
+    const count = clamp(Math.round(250 * Math.cbrt(E / 4e22)), 250, 20000);
+    this.ejecta.spawn({ point, normal, vImpact: vrel, count, color: [0.55, 0.32, 0.16], hot: 3200 });
+  }
+
   autoFrameTarget() {
     if (!this.view.autoFrame || this.mirror.length < 2) return null;
     const e = this.mirror[0];
@@ -1056,6 +1068,8 @@ export class Sim {
 
     const partOffset = vsub(this.anchor.pos, focus);
     const showGhosts = this._buildOrbitArcs(focus, jd);   // orbit arcs, vertices already in render-frame coords
+    // ejecta lives in an Earth-centred frame; hand the renderer Earth's render-frame position
+    if (this.ejecta && this.view.ejecta) this.ejecta.setRenderU(vsub(vadd(this.anchor.pos, this.mirror[0].pos), focus), 0.015);
     return {
       camera,
       timeSec: performance.now() / 1000,
@@ -1071,6 +1085,7 @@ export class Sim {
       belt: this.view.belt ? { d2000: jd - J2000, alpha: 0.5, focusOff: vscale(focus, -1) } : null,
       showOrbits: false,                 // static orbit ellipses replaced by the dynamic arc system
       showTrails: this.view.trails,
+      showEjecta: this.view.ejecta,
       showGhosts,
       lineOffsets: { orbits: vscale(focus, -1), trails: partOffset, aim: partOffset, ghost: [0, 0, 0] },
       lineAlphas: { orbits: 0.8, trails: 1, aim: 1, ghost: 0.85 },

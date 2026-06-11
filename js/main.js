@@ -1,6 +1,7 @@
 // main.js — boot + frame loop
 import { GPU } from './gpu.js';
 import { ParticleSystem } from './particles.js';
+import { EjectaSystem } from './ejecta.js';
 import { Renderer } from './renderer.js';
 import { OrbitCamera } from './camera.js';
 import { Sim } from './sim.js';
@@ -41,11 +42,8 @@ async function profileGPU(gpu, ps) {
     const c = perStep / (N * N);                      // ms per N²
     const LIVE_SUB = 4, budgetMs = 6.5;               // 4 substeps/frame must fit the budget
     const ideal = Math.sqrt(budgetMs / (LIVE_SUB * c));
-    // floor at MEDIUM (16k) — the dramatic bursts need that resolution, and 16k was the old default
-    // that ran fine on typical laptops. Only genuinely weak GPUs drop to low.
-    let suggested = 16384;
-    for (const t of [16384, 32768, 42000]) if (t <= ideal) suggested = t;
-    if (ideal < 13000) suggested = 8192;
+    let suggested = 8192;
+    for (const t of [8192, 16384, 32768, 42000]) if (t <= ideal) suggested = t;
     const tooWeak = (LIVE_SUB * c * 7000 * 7000 > 18) || perStep > 60;
     return { N, perStep: +perStep.toFixed(2), ideal: Math.round(ideal), suggested, tooWeak };
   } catch (e) {
@@ -119,9 +117,14 @@ async function start() {
     const sky8k = !prof.tooWeak && (qOverride ? qOverride >= 16384 : prof.suggested >= 16384);
     const renderer = await new Renderer().init(gpu, ps, { sky8k });
 
+    bootMsg('seeding impact ejecta…');
+    const ejecta = await new EjectaSystem().init(gpu);
+    renderer.ejecta = ejecta;
+
     bootMsg('assembling solar system…');
     const camera = new OrbitCamera(gpu.canvas);
     const sim = new Sim(gpu, ps, renderer, texData, qParam);
+    sim.ejecta = ejecta;
 
     const ui = new UI(sim, camera, renderer, {
       loadScenario(id, date) {
@@ -311,6 +314,7 @@ async function start() {
         if (plan.substeps > 0) ps.step(enc, plan.substeps);
         if (plan.thermal) ps.thermalStep(enc);
         if (plan.readback) ps.requestReadback(enc, sim.simTime);
+        if (sim.view.ejecta) { try { ejecta.step(enc, sim._lastSimDt || 0, sim.view.coolMul / 2500); } catch (e) { console.error('ejecta step', e); } }
         gpu.device.queue.submit([enc.finish()]);
         ps.afterSubmit();
 
