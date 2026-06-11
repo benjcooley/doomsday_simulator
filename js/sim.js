@@ -23,7 +23,7 @@ export class Sim {
     this.autoSlow = true;
     this.view = {
       clouds: true, atmo: true, cityLights: true, orbits: true, trails: true,
-      labels: true, belt: true, forceParticles: false, autoFrame: true, ejecta: false,
+      labels: true, belt: true, forceParticles: false, autoFrame: true, ejecta: true,
       bloom: 0.18, exposure: 1.0, coolMul: 2500, heatMul: 1.0, starBoost: 0.7,
     };
     this.maxSub = 10;          // adaptive substep budget (performance governor)
