@@ -1,0 +1,9 @@
+# dev telemetry (written at runtime by serve.py / the page)
+.dd_state.json
+.dd_cmd.json
+
+# local Claude Code config
+.claude/
+
+# OS cruft
+.DS_Store
