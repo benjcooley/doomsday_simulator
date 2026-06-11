@@ -70,6 +70,9 @@ export class UI {
       this.sim.warpUser = Math.exp(LNMIN + (LNMAX - LNMIN) * (this.dial.value / 1000));
       this._syncWarpBtns();
     });
+    // While the user holds the dial it's authoritative; otherwise it tracks the MEASURED rate.
+    this.dial.addEventListener('pointerdown', () => { this._dialDrag = true; });
+    window.addEventListener('pointerup', () => { this._dialDrag = false; });
     this.warpBtns = WARP_CHIPS.map((w) => {
       const b = this._el('button', 'btn warp chip', warpWrap, w.label);
       b.onclick = () => { this.sim.paused = false; this.setWarp(w.v); };
@@ -202,7 +205,11 @@ export class UI {
       const cb = this._el('input', '', row);
       cb.type = 'checkbox'; cb.checked = this.sim.view[key];
       this._el('span', '', row, label);
-      cb.addEventListener('change', () => { this.sim.view[key] = cb.checked; });
+      cb.addEventListener('change', () => {
+        this.sim.view[key] = cb.checked;
+        // turning cinematic framing back on releases any manual focus lock
+        if (key === 'autoFrame' && cb.checked) this.camera.manualFocus = false;
+      });
     };
     mkToggle('Clouds', 'clouds');
     mkToggle('Atmosphere', 'atmo');
@@ -233,7 +240,7 @@ export class UI {
     this._el('span', 'slabel', qRow, 'DENSITY');
     const qOut = this._el('span', 'sval', qRow, '');
     this.qDial = this._el('input', 'slider', qRow);
-    this.qDial.type = 'range'; this.qDial.min = 4000; this.qDial.max = 48000; this.qDial.step = 1000;
+    this.qDial.type = 'range'; this.qDial.min = 4000; this.qDial.max = 58000; this.qDial.step = 1000;
     this.qDial.value = this.sim.quality;
     this.qDial.title = 'Particle count — higher = finer detail, slower. Rebuilds on release.';
     const fmtQ = (n) => (n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : n);
@@ -262,6 +269,11 @@ export class UI {
     this.bannerEl = this._el('div', 'banner', r, '');
     this.tickerEl = this._el('div', 'ticker', r, '');
     this._tickerUntil = 0;
+
+    // "return to auto camera" pill — shown only while the user holds manual camera control
+    this.camPill = this._el('button', 'cam-pill', r, '↺ Return to auto camera <kbd>Space</kbd>');
+    this.camPill.style.display = 'none';
+    this.camPill.onclick = () => this.camera.returnToAuto();
 
     this.refreshFocusList();
     this._ready = true;
@@ -318,9 +330,10 @@ export class UI {
     }
   }
 
-  _focus(id) {
+  _focus(id, user = true) {
     const t = this.sim.focusTargets().find((x) => x.id === id) || { R: 6.4 };
-    this.camera.focusOn(this.sim.focusPosFn(id), t.R, { dist: Math.max(t.R * 4.5, this.camera._targetDist * 0.0 + t.R * 4.5) });
+    // snap to a sensible default distance for the body (≈4.5 radii); user picks jump instantly.
+    this.camera.focusOn(this.sim.focusPosFn(id), t.R, { dist: t.R * 4.5, user });
     this.focusSel.value = id;
   }
 
@@ -329,6 +342,14 @@ export class UI {
     this.focusSel.innerHTML = '';
     for (const t of this.sim.focusTargets()) this.focusSel.add(new Option(t.name, t.id));
     if ([...this.focusSel.options].some((o) => o.value === cur)) this.focusSel.value = cur;
+  }
+
+  updateCamPill() {
+    const show = this.camera.canReturnToAuto();
+    if (show !== this._pillShown) {
+      this._pillShown = show;
+      this.camPill.style.display = show ? 'flex' : 'none';
+    }
   }
 
   setWarp(v) {
@@ -347,7 +368,8 @@ export class UI {
 
   syncScenario() {
     this.refreshFocusList();
-    this._focus(this.sim.focusId === 'earth' ? 'earth' : this.sim.focusId);
+    // scenario load picks the default focus but leaves cinematic framing free to take over
+    this._focus(this.sim.focusId === 'earth' ? 'earth' : this.sim.focusId, false);
     const d = jdToDate(this.sim.jd0);
     this.dateInput.value = d.toISOString().slice(0, 16);
     this._syncWarpBtns();
@@ -370,17 +392,19 @@ export class UI {
       this._lastNum = now;
       const sim = this.sim;
       this.fpsEl.textContent = fps.toFixed(0) + ' fps';
+      // The slider STAYS where the user puts it (warpUser). The readout reports the measured
+      // rate + state, and flags when the live physics is throttling below the dial setting.
+      const physLive = !sim.frozen && sim.ps.activeN > 0;
       if (sim.paused) {
         this.warpReadout.textContent = 'PAUSED';
         this.warpReadout.title = '';
-      } else if (sim.warpEff < sim.warpUser * 0.72) {
-        // be honest about capping — the dial is set higher than physics can deliver
-        this.warpReadout.textContent = this.fmtWarp(sim.warpEff) + ' ⛔' ;
-        this.warpReadout.title = `Dial asks ${this.fmtWarp(sim.warpUser)} but the live physics caps at ~${this.fmtWarp(sim.warpEff)} on this GPU ` +
-          '(stability needs small timesteps near/after contact). Calm orbital phases run far faster via rigid ride-along.';
       } else {
-        this.warpReadout.textContent = this.fmtWarp(sim.warpEff);
-        this.warpReadout.title = '';
+        const throttled = sim.warpEff < sim.warpUser * 0.7;
+        const tag = physLive ? ' · SIM' : ' · cruise';
+        this.warpReadout.textContent = this.fmtWarp(sim.warpEff) + tag;
+        this.warpReadout.title = (throttled ? `Dial set to ${this.fmtWarp(sim.warpUser)}; ` : '') +
+          (physLive ? 'collision physics is running — time is paced to what the GPU can render.'
+                    : 'orbital cruise — particle sim paused; planetary motion at the dial rate until an impactor closes in.');
       }
       const d = jdToDate(sim.jdNow());
       if (document.activeElement !== this.dateInput) this.dateInput.value = d.toISOString().slice(0, 16);

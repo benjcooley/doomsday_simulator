@@ -219,6 +219,7 @@ export class ParticleSystem {
     f[8] = G_SIM; f[9] = Math.pow(0.5 * this.minRp, 2); f[10] = p.vClamp ?? 1.0; f[11] = p.coolMul;
     f[12] = p.heatMul; f[13] = p.time; f[14] = p.solarLum; f[15] = p.heatGate ?? 1;
     f[16] = p.settleDrag ?? 0; u[17] = this.debugIdx >>> 0;
+    u[18] = (p.consumedMask ?? 0) >>> 0;
     this.gpu.device.queue.writeBuffer(this.paramsBuf, 0, this.paramsArr);
   }
 

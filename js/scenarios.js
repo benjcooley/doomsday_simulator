@@ -6,7 +6,7 @@ export const SCENARIOS = [
     id: 'smash', title: 'Smash Test — Moon → Earth', skulls: 5,
     blurb: 'The Moon, dead center, gentle merger speed. Watch the goop, the ejecta rain, and the planet cook. (Press H to hide all chrome.)',
     warp0: 1200, focus: 'earth', camDist: 200, moon: 'none',
-    view: { orbits: false, belt: false, trails: true, autoFrame: true },
+    view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
       const dir = ctx.dirFromAngles(18, 7);
       const { pos, vel } = ctx.approach(dir, 140, 0.008, 0);   // gentle hit: 8 km/s approach
@@ -22,7 +22,7 @@ export const SCENARIOS = [
     id: 'fastmoon', title: 'Fastball — Moon at 30 km/s', skulls: 5,
     blurb: 'Same Moon, 2.5× escape velocity: full excavation regime. Craters and ejecta curtains instead of a gentle goop-merger. Compare with the Smash Test.',
     warp0: 1200, focus: 'earth', camDist: 200, moon: 'none',
-    view: { orbits: false, belt: false, trails: true, autoFrame: true },
+    view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
       const dir = ctx.dirFromAngles(18, 7);
       const { pos, vel } = ctx.approach(dir, 200, 0.030, 0);
@@ -98,13 +98,16 @@ export const SCENARIOS = [
     ],
   },
   {
-    id: 'jupiter', title: 'Jupiter Drops By', skulls: 5,
-    blurb: 'Jupiter arrives at one lunar distance. Earth and Moon discover what "Roche limit" means, intimately. Spaghetti time.',
+    id: 'jupiter', title: 'Jupiter, Head-On', skulls: 5,
+    blurb: '318 Earth masses on a dead-center collision course at 35 km/s. There is no "impact" — Earth is simply swallowed. First the Moon spaghettifies at the Roche limit, then you become a brief bright smudge in a new storm band.',
     warp0: 2500, focus: 'earth', camDist: 1600,
+    view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
       const dir = ctx.dirFromAngles(140, 12);
-      const { pos, vel } = ctx.approach(dir, 2600, 0.009, 320);
-      ctx.spawnImpactor({ recipe: 'jupiter', d_km: 139822, pos, vel, name: 'Jupiter (rogue twin)', countScale: 1.0 });
+      // dead-center (b=0), fast (35 km/s) and close (1100 Mm) so the giant SMASHES Earth
+      // instead of slowly dragging the whole system sunward on a sub-orbital trajectory.
+      const { pos, vel } = ctx.approach(dir, 1100, 0.035, 0);
+      ctx.spawnImpactor({ recipe: 'jupiter', d_km: 139822, pos, vel, name: 'Jupiter', countScale: 1.0 });
     },
     headlines: [
       { t: 2, text: 'Very large object inbound. Telescopes refuse to elaborate.' },
@@ -113,18 +116,18 @@ export const SCENARIOS = [
     ],
   },
   {
-    id: 'lance', title: 'The Lance — 0.1c', skulls: 5,
-    blurb: 'A 500 km iron asteroid at a tenth the speed of light. ~10³⁵ joules — a thousand times Earth’s binding energy. You get about thirty seconds to watch the glint grow. (γ=1.005: the relativity tax is modest. The apocalypse is classical.)',
+    id: 'lance', title: 'The Lance — 0.4c', skulls: 5,
+    blurb: 'A 500 km iron asteroid at four-tenths the speed of light. ~10³⁶ joules — sixteen thousand times Earth’s binding energy. You get about eight seconds to watch the glint grow. (γ=1.09: the relativity tax is small. The apocalypse is classical, and total.)',
     warp0: 90, focus: 'earth', camDist: 140,
-    view: { orbits: false, belt: false, trails: true, autoFrame: true },
+    view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
       const dir = ctx.dirFromAngles(95, 22);
-      const { pos, vel } = ctx.approach(dir, 80000, 30.0, 0);
+      const { pos, vel } = ctx.approach(dir, 80000, 120.0, 0);
       ctx.spawnImpactor({ recipe: 'iron', d_km: 500, pos, vel, name: 'The Lance', countScale: 40 });
     },
     headlines: [
-      { t: 2, text: 'Object detected at 0.1c. There is no plan for this.' },
-      { cond: 'approach', text: 'It crossed the Moon’s orbit in twelve seconds.' },
+      { t: 2, text: 'Object detected at 0.4c. There is no plan for this.' },
+      { cond: 'approach', text: 'It crossed the Moon’s orbit in three seconds.' },
       { cond: 'contact', text: 'PERFORATION. Entry wound. Exit wound. Planet pending.' },
     ],
   },

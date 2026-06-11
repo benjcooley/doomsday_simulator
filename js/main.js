@@ -11,24 +11,70 @@ const boot = document.getElementById('boot-status');
 const overlay = document.getElementById('boot-overlay');
 function bootMsg(t) { if (boot) boot.textContent = t; }
 
-function fatal(msg) {
+function fatal(msg, detail) {
   bootMsg('');
   overlay.style.display = 'flex';
+  overlay.style.opacity = '1';
   overlay.innerHTML = `<div class="boot-title">☄ DOOMSDAY SIMULATOR</div>
-    <div class="boot-sub" style="color:#ff5a4a;max-width:520px;text-align:center">${msg}</div>`;
+    <div class="boot-sub" style="color:#ff5a4a;max-width:560px;text-align:center;line-height:1.6">${msg}</div>` +
+    (detail ? `<div class="boot-sub" style="color:#7d8b9e;max-width:520px;text-align:center;font-size:11px;line-height:1.6;margin-top:4px">${detail}</div>` : '');
+}
+
+// Benchmark the real physics kernel to pick a sensible default density (and flag weak GPUs).
+// Cost of the fused O(N²) pass scales as N², so one timing fixes the whole curve.
+async function profileGPU(gpu, ps) {
+  const N = 8192;
+  try {
+    const { buildBlob } = await import('./blob.js');
+    ps.reset();
+    ps.addBlob(buildBlob('rock', 6.0, 5.0, N, {}), [0, 0, 0], [0, 0, 0], 'probe');
+    ps.writeParams({ dt: 1, settleBoost: 1, sunPos: [1e7, 0, 0], gmSun: 0, coolMul: 0,
+      heatMul: 0, time: 0, solarLum: 1, heatGate: 0, settleDrag: 0 });
+    const burst = () => { const e = gpu.device.createCommandEncoder(); ps.step(e, 1); gpu.device.queue.submit([e.finish()]); };
+    for (let w = 0; w < 3; w++) burst();             // warm up shader/caches
+    await gpu.device.queue.onSubmittedWorkDone();
+    const K = 12, t0 = performance.now();
+    for (let i = 0; i < K; i++) burst();
+    await gpu.device.queue.onSubmittedWorkDone();
+    const perStep = (performance.now() - t0) / K;     // ms for one substep at N
+    ps.reset();
+    const c = perStep / (N * N);                      // ms per N²
+    const LIVE_SUB = 4, budgetMs = 6.5;               // 4 substeps/frame must fit the budget
+    const ideal = Math.sqrt(budgetMs / (LIVE_SUB * c));
+    // floor at MEDIUM (16k) — the dramatic bursts need that resolution, and 16k was the old default
+    // that ran fine on typical laptops. Only genuinely weak GPUs drop to low.
+    let suggested = 16384;
+    for (const t of [16384, 32768, 42000]) if (t <= ideal) suggested = t;
+    if (ideal < 13000) suggested = 8192;
+    const tooWeak = (LIVE_SUB * c * 7000 * 7000 > 18) || perStep > 60;
+    return { N, perStep: +perStep.toFixed(2), ideal: Math.round(ideal), suggested, tooWeak };
+  } catch (e) {
+    ps.reset();
+    return { N, perStep: 0, ideal: 0, suggested: 16384, tooWeak: false, note: 'probe-failed:' + e.message };
+  }
 }
 
 async function start() {
   try {
     if (!navigator.gpu) {
-      fatal('WebGPU is not available in this browser. Use Chrome, Edge, Arc, or Safari 26+ on a recent machine.');
+      fatal('WebGPU is not available in this browser.',
+        'DOOMSDAY needs WebGPU. Use a recent Chrome, Edge, or Arc — or Safari 26+ on macOS — with hardware acceleration enabled.');
       return;
     }
     const url = new URL(location.href);
-    const qParam = { low: 8192, med: 16384, high: 32768, ultra: 42000 }[url.searchParams.get('q')] || 16384;
+    const qTiers = { low: 8192, med: 16384, high: 32768, ultra: 42000 };
+    const qOverride = qTiers[url.searchParams.get('q')] || null;
 
     bootMsg('acquiring GPU…');
-    const gpu = await new GPU().init(document.getElementById('gpu-canvas'));
+    let gpu;
+    try {
+      gpu = await new GPU().init(document.getElementById('gpu-canvas'));
+    } catch (e) {
+      fatal('Could not initialize WebGPU on this machine.',
+        (e && e.message ? e.message + ' — ' : '') +
+        'Use Chrome, Edge, or Arc (Safari 26+ on macOS), enable hardware acceleration, and prefer a machine with a dedicated GPU.');
+      return;
+    }
 
     bootMsg('decoding planetary surfaces…');
     const [earthDay, moon, mars, jupiter, venus, pluto] = await Promise.all([
@@ -57,8 +103,21 @@ async function start() {
     bootMsg('compiling physics kernels…');
     const ps = await new ParticleSystem().init(gpu);
 
+    bootMsg('profiling GPU…');
+    const prof = await profileGPU(gpu, ps);
+    console.log('GPU profile', JSON.stringify(prof));
+    if (prof.tooWeak && !qOverride) {
+      fatal('This GPU is too weak for the collision physics.',
+        `One physics step on ${prof.N.toLocaleString()} particles took ${prof.perStep} ms — even the lowest density would stutter badly. ` +
+        'The orbital view would be fine, but the smashing won’t. Append ?q=low to force it, or use a machine with a dedicated GPU.');
+      return;
+    }
+    const qParam = qOverride || prof.suggested;
+
     bootMsg('building render pipelines…');
-    const renderer = await new Renderer().init(gpu, ps);
+    // strong GPUs (profiler suggests medium density or better, and not weak) get the 8K skybox
+    const sky8k = !prof.tooWeak && (qOverride ? qOverride >= 16384 : prof.suggested >= 16384);
+    const renderer = await new Renderer().init(gpu, ps, { sky8k });
 
     bootMsg('assembling solar system…');
     const camera = new OrbitCamera(gpu.canvas);
@@ -83,7 +142,12 @@ async function start() {
     new ResizeObserver(() => renderer.resize()).observe(gpu.canvas);
     window.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      if (e.code === 'Space') { sim.paused = !sim.paused; ui._syncWarpBtns(); e.preventDefault(); }
+      if (e.code === 'Space') {
+        // when you've grabbed the camera, Space hands it back to the auto view; otherwise pause
+        if (camera.canReturnToAuto()) { camera.returnToAuto(); }
+        else { sim.paused = !sim.paused; ui._syncWarpBtns(); }
+        e.preventDefault();
+      }
       if (e.key === '[') { ui.setWarp(sim.warpUser / 2); }
       if (e.key === ']') { ui.setWarp(sim.warpUser * 2); }
       if (e.key === 'h' || e.key === 'H') {
@@ -137,6 +201,8 @@ async function start() {
       warpUser: Math.round(sim.warpUser * 100) / 100, paused: sim.paused,
       cmdAck: localStorage.getItem('dd_ack'),
       frozen: sim.frozen, maxSub: sim.maxSub, fps: Math.round(fps),
+      gate: { minGapR: +(sim._minGapR ?? 0).toFixed(2), wake: sim._wakeR, sleep: sim._sleepR,
+        settling: !!sim._settling, disturbed: !!sim.disturbedNow },
       pop: Math.round(sim.pop), killTarget: +sim.killTarget.toFixed(4),
       livLand: +(sim.livFrac ?? 1).toFixed(4),
       atmT: Math.round(sim.atmT || 288), kDust: +(sim.kDust || 0).toFixed(3),
@@ -233,8 +299,10 @@ async function start() {
         gpu.frameId = frameCount;
         sim.fps = fps;
         const plan = sim.tick(dtWall);
+        camera.autoEnabled = sim.view.autoFrame;
         camera.autoTarget = sim.autoFrameTarget();
         camera.update(dtWall);
+        ui.updateCamPill();
 
         // compute pass
         const enc = gpu.device.createCommandEncoder();

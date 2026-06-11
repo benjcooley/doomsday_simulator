@@ -24,7 +24,7 @@ export class Sim {
     this.view = {
       clouds: true, atmo: true, cityLights: true, orbits: true, trails: true,
       labels: true, belt: true, forceParticles: false, autoFrame: true,
-      bloom: 0.18, exposure: 1.0, coolMul: 2500, heatMul: 1.0, starBoost: 0.5,
+      bloom: 0.18, exposure: 1.0, coolMul: 2500, heatMul: 1.0, starBoost: 0.7,
     };
     this.maxSub = 10;          // adaptive substep budget (performance governor)
     this.warpSmooth = 60;
@@ -54,6 +54,8 @@ export class Sim {
     this.ps.reset();
     this.mirror = [];
     this.contacts = new Set();
+    this.consumedMask = 0;
+    this._impactHold = null;
     this.events = (def.headlines || []).map((h) => ({ ...h, fired: false }));
     this._fillerSeen = new Set();
     this._fillerT = 0;
@@ -74,10 +76,12 @@ export class Sim {
     this.atmT = 288;
     this._lastCumJ = 0;
     this.vClampNeed = 1;
+    this._heatArmed = false;
     this.banner = null;
     this.headlineQueue = [];
     this.settleUntil = 1800;
     this.renderer.clearTrails();
+    this.renderer.clearGhosts();
     this.renderer.writeAim(new Float32Array(0), 0);
     this.trails = [];
     this.settleUntil = 3600;
@@ -106,35 +110,33 @@ export class Sim {
     if (moonMode !== 'none') {
       const mp = moonGeo(this.jd0);
       let mv = moonGeoVel(this.jd0);
-      if (moonMode === 'stopped') mv = [0, 0, 0];
-      if (typeof moonMode === 'object' && moonMode.velScale !== undefined) mv = vscale(mv, moonMode.velScale);
+      let moonCanonical = true;        // real lunar orbit unless the scenario alters its velocity
+      if (moonMode === 'stopped') { mv = [0, 0, 0]; moonCanonical = false; }
+      if (typeof moonMode === 'object' && moonMode.velScale !== undefined) { mv = vscale(mv, moonMode.velScale); moonCanonical = false; }
       const mb = buildBlob('moon', CATALOG.moon.R, CATALOG.moon.M, Math.round(this.quality * 0.13), {
         textures: { moon: this.texData.moon }, pole: earthPoleEcliptic(), theta: 0,
       });
       this.ps.addBlob(mb, mp, mv, 'Moon');
-      this._addMirror('Moon', CATALOG.moon.M, CATALOG.moon.R, mp, mv, 1, [0.8, 0.8, 0.85]);
+      this._addMirror('Moon', CATALOG.moon.M, CATALOG.moon.R, mp, mv, 1, [0.8, 0.8, 0.85], moonCanonical);
       const mm = this.mirror[this.mirror.length - 1];
       mm.shellTex = '2k_moon.jpg'; mm.shellFade = 1;
     }
 
     if (def.build) def.build(this._ctx());
 
-    // decorative orbit lines
-    const segs = PLANET_NAMES.map((n) => ({
-      pts: orbitPolyline(n, this.jd0, n === 'earth' ? 360 : 220),
-      color: n === 'earth' ? [0.3, 0.7, 1, 0.30] : [0.55, 0.6, 0.7, 0.20],
-    }));
-    this.renderer.writeOrbits(segs);
+    // capture each body's original orbit (fixed reference paths — deviation is drawn against these)
+    this._captureOriginalOrbits();
 
     this.focusId = def.focus || 'earth';
     this.camHint = { dist: def.camDist || 40 };
     this.statusText = 'SIMULATION READY';
   }
 
-  _addMirror(name, M, R, pos, vel, slot, color) {
+  _addMirror(name, M, R, pos, vel, slot, color, canonical = false) {
     this.mirror.push({
       name, M, R, pos: pos.slice(), vel: vel.slice(), slot, color, trail: [], trailAcc: 0,
       freezePos: pos.slice(), freezeVel: vel.slice(),
+      canonical,   // on a real orbit? ghost predicted-orbit is only drawn for canonical bodies
     });
     if (this.frozen) this._wake = true;   // a new body always wakes the mechanics
   }
@@ -375,48 +377,76 @@ export class Sim {
     const disturbed = this.contacts.size > 0 || this.dissolveGo ||
       surfT0adj > 400 || this.moltenDelta(0) > 0.01 || this.boundLoss(0) > 0.01 ||
       dSunEarth < 42000;
-    const calm = !disturbed && minGap > 12 * gapSumR;
     // aftermath sleep: when every body is mechanically at rest (per fresh readback), the
     // expensive dynamics can sleep even though "disturbed" — only heat keeps evolving
     const statsFresh = this.statsCache && (this.simTime - (this.statsCache.simTimeTag || 0)) < Math.max(1800, this.warpEff * 1.2);
     const allQuiet = !!(statsFresh && this.statsCache.bodies.every((sb) => !sb || sb.count < 3 || sb.rmsV < 0.05)) &&
       minGap > 10 * gapSumR;
-    if (this._wake && this.frozen) {
-      this._wake = false;
-      this.frozen = false;
-      for (const b of this.mirror) {
-        out.shifts.push({ slot: b.slot, dp: vsub(b.pos, b.freezePos), dv: vsub(b.vel, b.freezeVel) });
-      }
-    }
-    // Blobs can only support themselves mechanically at small timesteps: the dt-aware spring
-    // clamp makes them soft at large dt, so a planet run at dt 20-45s slowly IMPLODES under its
-    // own gravity, then detonates when dt shrinks near an encounter (the "white-hot Earth long
-    // before impact" bug). Therefore the live sim NEVER exceeds ~2x the stable dt — any faster
-    // time travel uses the frozen rigid ride-along instead. Freeze is decided by the timestep
-    // the user's warp would require, not by an arbitrary warp number.
+
+    // ── PARTICLE-SIM GATE ──────────────────────────────────────────────────────────────────
+    // The particle sim does NOT run until two bodies are reasonably near. The central blob
+    // settles live first (the settle window), then the system CRUISES in the frozen rigid
+    // ride-along — bodies move on their orbits, particles ride along, only heat evolves —
+    // at any warp, on any machine. It WAKES (starts the particle sim) when bodies close to
+    // within WAKE radii, so the final approach + impact run fully live. This reuses the exact
+    // freeze path already used for aftermath sleep; it just triggers on proximity, not warp.
     const dtCap = clamp(this.ps.dtStable * 2, 2, 8);
-    const liveDtWanted = (warp * dtWallSim) / Math.max(this.maxSub, 1);
+    const WAKE = 4, SLEEP = 6;        // hysteresis, in units of (Ra + Rb)
+    if (this._wake && this.frozen) { this._wake = false; this.frozen = false; }
     if (this.frozen) {
-      if ((!calm && !allQuiet) || minGap < 10 * gapSumR || liveDtWanted < dtCap * 0.9) {
-        this.frozen = false;
+      if (disturbed || minGap < WAKE * gapSumR) {
+        this.frozen = false;          // wake: hand the rigid offset back, resume live physics
         for (const b of this.mirror) {
           out.shifts.push({ slot: b.slot, dp: vsub(b.pos, b.freezePos), dv: vsub(b.vel, b.freezeVel) });
         }
       }
-    } else if (!settling && liveDtWanted > dtCap * 1.3 && (calm || allQuiet)) {
-      this.frozen = true;
+    } else if (!settling && !disturbed && (minGap > SLEEP * gapSumR || allQuiet)) {
+      this.frozen = true;             // sleep: capture the rigid reference, stop the sim
       for (const b of this.mirror) { b.freezePos = b.pos.slice(); b.freezeVel = b.vel.slice(); }
     }
+    // freeze-gate telemetry
+    this._minGapR = minGap / gapSumR;
+    this._settling = settling;
+    this._wakeR = WAKE; this._sleepR = SLEEP;
 
-    // relativistic impactors: shrink the timestep so a 0.1c body can't cross Earth inside
-    // one step (automatic extreme slow-mo through the lance moment)
-    let dtCapEff = dtCap;
-    if (closing > 0.05 && minGap < 50 * gapSumR) {
-      dtCapEff = clamp((0.5 * this.ps.minRp) / closing, 0.002, dtCap);
+    // timestep ceiling. Frozen cruise takes huge steps when far, but must not step PAST the
+    // wake point (so a fast/relativistic impactor can't tunnel through it). Live physics is
+    // capped near the stable dt, shrinking further on close approach (lance slow-mo).
+    let dtSubMax;
+    if (this.frozen) {
+      dtSubMax = 1200;
+      if (closing > 1e-9 && minGap > WAKE * gapSumR) {
+        dtSubMax = clamp((minGap - WAKE * gapSumR) / closing, 2, 1200);
+      }
+    } else {
+      dtSubMax = dtCap;
+      // Anti-tunnel: a fast impactor must never advance more than ~0.4 of a particle radius per
+      // substep, or it threads between particles and passes through with no momentum transfer.
+      // Gated on APPROACH (closing > 0) so it holds through the whole collision while the Lance is
+      // still plowing in, then releases the instant the remnant decelerates or recedes (closing
+      // drops) — that natural relaxation is what returns the sim to normal timesteps afterward.
+      if (closing > 0.05 && minGap < 50 * gapSumR) {
+        dtSubMax = clamp((0.4 * this.ps.minRp) / closing, 1e-5, dtCap);
+      }
+      // post-contact impact hold: keep the collision resolving at extra-fine substeps for a while
+      if (this._impactHold && this.simTime < this._impactHold.until) {
+        dtSubMax = Math.min(dtSubMax, this._impactHold.dt);
+      }
     }
-    let dtSubMax = this.frozen ? 1200 : dtCapEff;
+    // Particle-sim workload is DECOUPLED from the slider: live collision physics runs a small
+    // FIXED substep budget per frame (smooth at any warp), so the slider can't pile up O(N²)
+    // passes and stutter. The frozen cruise still takes many big steps, so the slider speeds up
+    // the planetary/approach motion — not the collision. The slider then reads back the MEASURED
+    // rate (warpEff) so it never claims 60× while actually running 12×.
+    // Substep budget is AUTO-DERIVED from the no-tunnel ceiling: substeps = ceil(want / dtSubMax),
+    // so the faster the impactor, the smaller dtSubMax, the more substeps it automatically takes.
+    // Normal collisions stay at 4 (smooth, warp-decoupled — no jitter). Only when the no-tunnel
+    // ceiling has forced a tiny dt (a hypervelocity/relativistic impactor) is the larger budget it
+    // physically needs unlocked — the impact is brief, so the short, heavier burst is worth it.
+    const hyper = !this.frozen && dtSubMax < 0.5;
+    const liveCap = this.frozen ? 12 : (hyper ? 32 : 4);
     let want = warp * dtWallSim;
-    let substeps = clamp(Math.ceil(want / dtSubMax), 1, this.frozen ? 12 : this.maxSub);
+    let substeps = clamp(Math.ceil(want / dtSubMax), 1, liveCap);
     let dtSub = Math.min(want / substeps, dtSubMax);
     const simDt = dtSub * substeps;
     this.warpEff = simDt / dtWallSim;
@@ -439,12 +469,13 @@ export class Sim {
       this.anchor.vel = vadd(this.anchor.vel, vscale(aAnchor, dtSub));
       this.anchor.pos = vadd(this.anchor.pos, vscale(this.anchor.vel, dtSub));
       for (const b of this.mirror) {
+        if (b.consumed) continue;          // halted at the Sun's centre — no more motion
         const ds = vsub(sunL, b.pos);
         const r2s = vdot(ds, ds);
         const ir = 1 / Math.sqrt(Math.max(r2s, 1));
         let acc = vsub(vscale(ds, GM_SUN * ir * ir * ir), aAnchor);
         for (const o of this.mirror) {
-          if (o === b) continue;
+          if (o === b || o.consumed) continue;
           const d = vsub(o.pos, b.pos);
           const r2 = vdot(d, d) + 0.05;
           const irr = 1 / Math.sqrt(r2);
@@ -452,7 +483,7 @@ export class Sim {
         }
         b.vel = vadd(b.vel, vscale(acc, dtSub));
       }
-      for (const b of this.mirror) b.pos = vadd(b.pos, vscale(b.vel, dtSub));
+      for (const b of this.mirror) { if (!b.consumed) b.pos = vadd(b.pos, vscale(b.vel, dtSub)); }
     }
 
     // contact events (first touch per pair) — SWEPT test: a 0.1c body must not be able to
@@ -479,6 +510,16 @@ export class Sim {
           const mu = (a.M * b.M) / (a.M + b.M);
           const E = 0.5 * mu * vrel * vrel * 1e36;
           this.cumImpactJ += E;
+          // IMPACT HOLD: a fast impactor hits thousands of particles over its whole traversal —
+          // hold extra-fine substeps for a window AFTER contact so the full blast/ejecta develops
+          // instead of the timestep ballooning and the slug tunnelling through. Window ≈ time to
+          // plough ~50 combined-radii at the impact speed; finer dt for faster hits.
+          if (vrel > 0.06) {
+            this._impactHold = {
+              until: this.simTime + Math.min(8, 50 * (a.R + b.R) / vrel),
+              dt: Math.max(1e-5, Math.min(2, 0.18 * this.ps.minRp / vrel)),
+            };
+          }
           this._fireCond('contact');
           if (a.name === 'Earth' || b.name === 'Earth') {
             this.dissolveGo = true;
@@ -510,6 +551,7 @@ export class Sim {
       if (sT > 1500) this._fireCond('hot:1500');
     }
     this._updateDissolve(dtWall);
+    this._updateSunConsumption();
 
     // timed headlines
     for (const ev of this.events) {
@@ -569,8 +611,17 @@ export class Sim {
         time: this.simTime,
         solarLum: 1,
         vClamp: Math.max(1, this.vClampNeed || 1),
-        heatGate: this.simTime > this.settleUntil ? 1 : 0,
-        settleDrag: (!disturbed && this.simTime < this.settleUntil - 700) ? 1 / 240 : 0,
+        // frictional heat fires ONLY from a REAL event — an actual contact, or a sun-plunge.
+        // It must NOT arm on boundLoss/molten/surfT, because at low density a coarse blob
+        // churns slightly as it settles, and arming on that churn creates a self-amplifying
+        // leak that boils the planet before anything hits it. Latches on so aftermath cooks.
+        heatGate: (this.simTime > this.settleUntil && (this._heatArmed = this._heatArmed || this.contacts.size > 0 || dSunEarth < 42000)) ? 1 : 0,
+        // A body that has NOT been hit by a real event stays locked to rigid-body motion (bulk
+        // drift + spin), so its surface can't drift off and a coarse low-density blob can't shed
+        // its skin. The instant a real impact arms heat, the drag releases and physics splashes
+        // it freely. This replaces the old fixed settle window — calm planets just hold their shape.
+        settleDrag: this._heatArmed ? 0 : 1 / 60,
+        consumedMask: this.consumedMask || 0,
       });
       out.substeps = substeps;
       out.dtSub = dtSub;
@@ -623,6 +674,33 @@ export class Sim {
     if (this.dissolveGo && this.dissolve < 1) this.dissolve = Math.min(1, this.dissolve + dtWall / 1.6);
   }
 
+  // THE SUN IS A UNIVERSAL DESTROYER. A whole body is annihilated the instant its path crosses
+  // within 5× the Sun's radius. A swept (point-to-segment) test catches fast in-fallers that
+  // would tunnel a sphere test. Sets the slot bit → the GPU kills every particle of that body
+  // (halted, mass 0, parked at the Sun's centre). The mask latches; consumption is forever.
+  _updateSunConsumption() {
+    const R_SUN = 695.7, killR2 = (5 * R_SUN) ** 2;
+    if (this.consumedMask === undefined) this.consumedMask = 0;
+    for (const b of this.mirror) {
+      const helioNow = vadd(this.anchor.pos, b.pos);   // Sun sits at the heliocentric origin
+      if (!b._helioPrev) b._helioPrev = helioNow.slice();
+      if (!b.consumed) {
+        const a = b._helioPrev, ab = vsub(helioNow, a), dd = vdot(ab, ab);
+        const t = dd > 1e-9 ? clamp(-vdot(a, ab) / dd, 0, 1) : 0;
+        const closest = vadd(a, vscale(ab, t));
+        if (vdot(closest, closest) < killR2) {
+          b.consumed = true;
+          this.consumedMask |= (1 << b.slot);
+          b.vel = [0, 0, 0];
+          this.banner = { text: `☀ ${b.name.toUpperCase()} CONSUMED BY THE SUN`, kind: 'danger', until: performance.now() + 9000 };
+          this.headlineQueue.push(`${b.name} has fallen into the Sun. Nothing remains.`);
+          if (b.name === 'Earth') { this.dissolveGo = true; this._heatArmed = true; this.killTarget = 1; this.pop = 0; }
+        }
+      }
+      b._helioPrev = helioNow.slice();
+    }
+  }
+
   applyStats(stats) {
     this.statsCache = stats;
     if (this.thermalJ0 === null) this.thermalJ0 = stats.thermalJ;
@@ -642,6 +720,7 @@ export class Sim {
     const fresh = staleness < Math.max(900, this.warpEff * 0.5);
     if (!this.frozen && this.disturbedNow && fresh) {
       for (const b of this.mirror) {
+        if (b.consumed) continue;          // its particles are parked at the Sun — ignore their CoM
         const sb = stats.bodies[b.slot];
         if (sb && sb.count > 2) { b.pos = sb.com.slice(); b.vel = sb.cov.slice(); }
       }
@@ -683,7 +762,9 @@ export class Sim {
     this.kDust = (this.kDust || 0) + (kE - (this.kDust || 0)) * (1 - Math.exp(-simDt / 216000));
     const kill = 1 - liv * (1 - kAtm) * (1 - this.kDust);
     this.livFrac = liv;
-    this.killTarget = Math.max(this.killTarget, kill);
+    // No casualties until a real event has armed the sim — a coarse blob settling on a weak
+    // laptop must never read as a mass-extinction before anything has actually happened.
+    if (this._heatArmed || this.contacts.size > 0) this.killTarget = Math.max(this.killTarget, kill);
     const target = POP_2026 * (1 - this.killTarget);
     // deaths are effectively instant at apocalypse scale; only slow-burn kills linger
     const tau = this.killTarget > 0.5 ? 240 : 3600;
@@ -762,13 +843,87 @@ export class Sim {
     return t;
   }
 
-  // Cinematic auto-framing: keep Earth and the most imminent threat in view together.
+  // One full original orbit sampled in EQUAL TIME STEPS (leapfrog) from a state at sim start.
+  // Returns { pts (M×3 relative to attractor), M, dt } — fixed for the run; the body deviates from it.
+  _fullOrbit(r0, v0, GM, M) {
+    let px = r0[0], py = r0[1], pz = r0[2], vx = v0[0], vy = v0[1], vz = v0[2];
+    const r = Math.hypot(px, py, pz), v2 = vx * vx + vy * vy + vz * vz;
+    const energy = v2 / 2 - GM / Math.max(r, 1e-6);
+    let period;
+    if (energy < -1e-12) { const a = -GM / (2 * energy); period = 2 * Math.PI * Math.sqrt(a * a * a / GM); }
+    else period = 8 * r / Math.max(Math.sqrt(v2), 1e-6);   // unbound: pseudo-span
+    period = Math.min(period, 6.5e9);                        // cap ~205 yr (Neptune)
+    const dt = period / M;
+    const pts = new Float64Array(M * 3);
+    for (let i = 0; i < M; i++) {
+      pts[i * 3] = px; pts[i * 3 + 1] = py; pts[i * 3 + 2] = pz;
+      let rr = Math.hypot(px, py, pz), f = -GM / (rr * rr * rr);
+      vx += px * f * dt * 0.5; vy += py * f * dt * 0.5; vz += pz * f * dt * 0.5;
+      px += vx * dt; py += vy * dt; pz += vz * dt;
+      rr = Math.hypot(px, py, pz); f = -GM / (rr * rr * rr);
+      vx += px * f * dt * 0.5; vy += py * f * dt * 0.5; vz += pz * f * dt * 0.5;
+    }
+    return { pts, M, dt };
+  }
+
+  // Capture every standard-orbit body's ORIGINAL orbit at sim start: Earth + planets (heliocentric),
+  // canonical Moon (geocentric). These stay fixed — the whole point is to watch bodies deviate from them.
+  _captureOriginalOrbits() {
+    this.origArcs = [];
+    const e = this.mirror[0], M = 256;
+    this.origArcs.push({ ...this._fullOrbit(vadd(this.anchor.pos, e.pos), vadd(this.anchor.vel, e.vel), GM_SUN, M), frame: 'helio', color: [0.35, 0.7, 1], kind: 'earth' });
+    for (const nm of PLANET_NAMES) {
+      if (nm === 'earth') continue;
+      this.origArcs.push({ ...this._fullOrbit(planetPos(nm, this.jd0), planetVel(nm, this.jd0), GM_SUN, M), frame: 'helio', color: [0.5, 0.58, 0.72], kind: 'planet', name: nm });
+    }
+    for (const b of this.mirror) {
+      if (b.slot === 0 || !b.canonical) continue;   // Moon on its real orbit → geocentric ring
+      this.origArcs.push({ ...this._fullOrbit(vsub(b.pos, e.pos), vsub(b.vel, e.vel), G_SIM * e.M, M), frame: 'geo', color: b.color.slice(), kind: 'moon', slot: b.slot });
+    }
+  }
+
+  // Draw each original orbit as a trailing arc: HEAD = the body's live centre (dead-centre, recomputed
+  // each frame), then the fixed original orbit walked backward ~95% of its period, fading the tail.
+  // When undisturbed the head sits exactly on the arc; under perturbation it visibly peels away.
+  _buildOrbitArcs(focus, jd) {
+    this.renderer.clearGhosts();
+    if (!this.view.orbits || !this.origArcs) return false;
+    const e = this.mirror[0], eHelio = vadd(this.anchor.pos, e.pos);
+    let gi = 0;
+    for (const arc of this.origArcs) {
+      if (gi >= 15) break;
+      let curHelio;   // body's ACTUAL heliocentric centre now
+      if (arc.kind === 'earth') curHelio = eHelio;
+      else if (arc.kind === 'planet') curHelio = planetPos(arc.name, jd);
+      else { const b = this.mirror.find((x) => x.slot === arc.slot); if (!b || b.consumed) continue; curHelio = vadd(this.anchor.pos, b.pos); }
+      const M = arc.M, head = Math.floor(this.simTime / arc.dt), count = Math.floor(0.95 * M), nPts = count + 1;
+      const buf = new ArrayBuffer(nPts * 16), f = new Float32Array(buf), u8 = new Uint8Array(buf);
+      const hr = vsub(curHelio, focus);
+      f[0] = hr[0]; f[1] = hr[1]; f[2] = hr[2];
+      u8[12] = arc.color[0] * 255; u8[13] = arc.color[1] * 255; u8[14] = arc.color[2] * 255; u8[15] = 255;
+      for (let k = 0; k < count; k++) {
+        const idx = ((head - k) % M + M) % M;
+        const wx = arc.pts[idx * 3], wy = arc.pts[idx * 3 + 1], wz = arc.pts[idx * 3 + 2];
+        const j = k + 1;
+        if (arc.frame === 'geo') { f[j * 4] = eHelio[0] + wx - focus[0]; f[j * 4 + 1] = eHelio[1] + wy - focus[1]; f[j * 4 + 2] = eHelio[2] + wz - focus[2]; }
+        else { f[j * 4] = wx - focus[0]; f[j * 4 + 1] = wy - focus[1]; f[j * 4 + 2] = wz - focus[2]; }
+        const frac = j / nPts;
+        const al = frac < 0.7 ? 1 : Math.max(0, 1 - (frac - 0.7) / 0.3);   // fade the trailing 30%
+        const o = j * 16 + 12;
+        u8[o] = arc.color[0] * 255; u8[o + 1] = arc.color[1] * 255; u8[o + 2] = arc.color[2] * 255; u8[o + 3] = al * 255;
+      }
+      this.renderer.writeGhost(gi++, new Float32Array(buf), nPts);
+    }
+    return gi > 0;
+  }
+
   autoFrameTarget() {
     if (!this.view.autoFrame || this.mirror.length < 2) return null;
     const e = this.mirror[0];
     let best = null, bestScore = Infinity;
     for (let j = 1; j < this.mirror.length; j++) {
       const b = this.mirror[j];
+      if (b.consumed) continue;            // eaten by the Sun — nothing to frame
       const d = vsub(b.pos, e.pos);
       const dist = vlen(d);
       const gap = dist - e.R - b.R;
@@ -900,6 +1055,7 @@ export class Sim {
     }
 
     const partOffset = vsub(this.anchor.pos, focus);
+    const showGhosts = this._buildOrbitArcs(focus, jd);   // orbit arcs, vertices already in render-frame coords
     return {
       camera,
       timeSec: performance.now() / 1000,
@@ -913,10 +1069,11 @@ export class Sim {
       globe,
       particles: true,
       belt: this.view.belt ? { d2000: jd - J2000, alpha: 0.5, focusOff: vscale(focus, -1) } : null,
-      showOrbits: this.view.orbits,
+      showOrbits: false,                 // static orbit ellipses replaced by the dynamic arc system
       showTrails: this.view.trails,
-      lineOffsets: { orbits: vscale(focus, -1), trails: partOffset, aim: partOffset },
-      lineAlphas: { orbits: 0.8, trails: 1, aim: 1 },
+      showGhosts,
+      lineOffsets: { orbits: vscale(focus, -1), trails: partOffset, aim: partOffset, ghost: [0, 0, 0] },
+      lineAlphas: { orbits: 0.8, trails: 1, aim: 1, ghost: 0.85 },
       bloomStrength: this.view.bloom,
       bloomThresh: 1.4,
     };

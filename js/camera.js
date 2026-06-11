@@ -1,26 +1,33 @@
-// camera.js — orbit camera around a focus target with smooth transitions
-import { clamp, vadd, vsub, vlerp } from './mathx.js';
+// camera.js — orbit camera. ONE focal point; smoothing is framerate-INDEPENDENT
+// (1 - exp(-rate*dt), exact at any framerate). Two modes:
+//   AUTO   — follows the focused body, or the sim's cinematic framing target.
+//   MANUAL — the moment you drag/zoom, the camera is yours and STAYS yours (it only keeps
+//            the focused body centered as it moves). It never grabs control back on a timer.
+//            Press Space (or click the pill) to return to the auto view.
+import { clamp, vlerp } from './mathx.js';
 
 export class OrbitCamera {
   constructor(canvas) {
     this.canvas = canvas;
     this.yaw = 0.6;
     this.pitch = 0.32;
-    this.dist = 40;          // Mm from focus
+    this.dist = 40;                 // smoothed distance actually used to render
+    this._targetDist = 40;          // where zoom wants to be
     this.minDist = 8;
     this.maxDist = 8e6;
     this.fov = 50 * Math.PI / 180;
-    this.focusPos = [0, 0, 0];      // heliocentric Mm (double) — set externally per frame
-    this._targetDist = this.dist;
-    this._vyaw = 0; this._vpitch = 0;
-    this.idle = true;
-    this._idleT = 0;
+    this.focusPos = [0, 0, 0];      // heliocentric Mm
 
-    this.userTouched = 0;        // last manual interaction (ms) — pauses auto-framing
-    this.autoTarget = null;      // {pos: helio, dist} fed by sim's cinematic framing
+    this.getFocusPos = null;        // () => helio pos of the focused body
+    this.autoTarget = null;         // {pos, dist} from sim's cinematic framing (set each frame)
+    this.autoEnabled = false;       // sim.view.autoFrame (set each frame)
+    this.manualFocus = false;       // a user focus pick overrides cinematic auto-framing
+    this.manual = false;            // user has taken control
+    this.idle = true;               // pre-first-input cinematic drift
+
+    const takeControl = () => { this.manual = true; this.idle = false; };
     canvas.addEventListener('pointerdown', (e) => {
-      this.idle = false;
-      this.userTouched = performance.now();
+      takeControl();
       this._drag = { x: e.clientX, y: e.clientY, id: e.pointerId };
       canvas.setPointerCapture(e.pointerId);
     });
@@ -36,48 +43,42 @@ export class OrbitCamera {
     canvas.addEventListener('pointercancel', endDrag);
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
-      this.idle = false;
-      this.userTouched = performance.now();
-      const f = Math.exp(e.deltaY * 0.0012);
-      this._targetDist = clamp(this._targetDist * f, this.minDist, this.maxDist);
+      takeControl();
+      this._targetDist = clamp(this._targetDist * Math.exp(e.deltaY * 0.0012), this.minDist, this.maxDist);
     }, { passive: false });
-    canvas.addEventListener('dblclick', () => { this.idle = true; this._idleT = 0; });
   }
+
+  // can the user hand control back to an automatic view right now?
+  canReturnToAuto() { return this.manual && (this.autoEnabled || !!this.getFocusPos); }
+  returnToAuto() { this.manual = false; }
 
   focusOn(getPos, radius, opts = {}) {
     this.getFocusPos = getPos;
     this.minDist = Math.max(0.4, radius * 1.25);
-    // explicit body selection: follow that body for a while even if auto-framing exists
-    this.followUntil = performance.now() + 12000;
+    this.manual = false;                       // an explicit pick returns to auto-follow
+    this.manualFocus = !!opts.user;            // a user pick overrides cinematic auto-framing
     if (opts.dist) this._targetDist = clamp(opts.dist, this.minDist, this.maxDist);
     if (this._targetDist < this.minDist) this._targetDist = this.minDist * 3;
-    if (opts.jump) { this.dist = this._targetDist; this.focusPos = getPos().slice(); }
+    if (opts.jump || opts.user) {              // user picks SNAP straight to the body
+      this.dist = this._targetDist;
+      this.focusPos = getPos().slice();
+    }
   }
 
   update(dt) {
-    // ONE focal point, ONE smoothing law — and when the USER moves the camera during
-    // auto-framing, the focal point simply HOLDS (orbit where you are). No fallback target,
-    // no destination fight, no glide-back ping-pong. Body-follow happens only when there is
-    // no framing target, or right after an explicit focus selection.
-    const now = performance.now();
-    const explicitFollow = now < (this.followUntil || 0);
-    const autoActive = this.autoTarget && !explicitFollow && now - this.userTouched > 4500;
-    let desired = this.focusPos;                      // default: HOLD (user-owned point)
-    let desiredDist = this._targetDist;
-    if (autoActive) {
-      desired = this.autoTarget.pos;
+    dt = Math.min(dt, 0.05);                   // a hitch must not teleport the camera
+    let desiredPos, desiredDist;
+    if (!this.manual && !this.manualFocus && this.autoEnabled && this.autoTarget) {
+      desiredPos = this.autoTarget.pos;        // cinematic framing owns both
       desiredDist = clamp(this.autoTarget.dist, this.minDist, this.maxDist);
-    } else if (this.getFocusPos && (explicitFollow || !this.autoTarget)) {
-      desired = this.getFocusPos();
+    } else {
+      desiredPos = this.getFocusPos ? this.getFocusPos() : this.focusPos;  // keep body centered
+      desiredDist = this._targetDist;          // user-controlled zoom (or held in manual)
     }
-    const k = Math.min(1, dt * 6);
-    this.focusPos = vlerp(this.focusPos, desired, k);
-    this._targetDist += (desiredDist - this._targetDist) * Math.min(1, dt * 1.8);
-    this.dist += (this._targetDist - this.dist) * Math.min(1, dt * 7);
-    if (this.idle) {
-      this._idleT += dt;
-      this.yaw += dt * 0.018;        // slow cinematic drift until first input
-    }
+    // exact framerate-independent exponential smoothing
+    this.focusPos = vlerp(this.focusPos, desiredPos, 1 - Math.exp(-5 * dt));
+    this.dist += (desiredDist - this.dist) * (1 - Math.exp(-6 * dt));
+    if (this.idle && !this.manual) this.yaw += dt * 0.02;   // gentle pre-input drift only
   }
 
   // camera position relative to focus (render frame origin = focus)

@@ -49,8 +49,16 @@ struct VOut { @builtin(position) pos: vec4f, @location(0) ndc: vec2f }
   let dir = normalize(F.camFwd + F.camRight * (in.ndc.x * F.tanHalf * F.aspect) + F.camUp * (in.ndc.y * F.tanHalf));
   let u = atan2(dir.y, dir.x) / 6.2831853 + 0.5;
   let v = acos(clamp(dir.z, -1.0, 1.0)) / 3.14159265;
-  let c = textureSampleLevel(starTex, smp, vec2f(u, v), 0.0).rgb;
-  return vec4f(c * F.starBoost, 1.0);
+  var c = textureSampleLevel(starTex, smp, vec2f(u, v), 0.0).rgb;
+  // prettify: gentle saturation lift so the galactic dust glows warm/blue instead of grey,
+  // a soft gamma to deepen the gaps, and the brightest band pushed a touch for the Milky Way.
+  let lum = dot(c, vec3f(0.299, 0.587, 0.114));
+  c = mix(vec3f(lum), c, 1.35);                       // +saturation
+  c = pow(max(c, vec3f(0.0)), vec3f(1.18));            // deepen the void between stars
+  c = c + c * smoothstep(0.25, 0.8, lum) * 0.6;        // bloomable lift on the galactic plane
+  // deep-space ambient floor — never pure black, faint cold tint with a hint of warmth
+  let ambient = vec3f(0.013, 0.016, 0.028);
+  return vec4f(ambient + c * F.starBoost, 1.0);
 }
 `;
 
@@ -411,7 +419,7 @@ struct VOut { @builtin(position) pos: vec4f, @location(0) q: vec2f }
   let e2 = elems[ai * 2u + 1u];
   let a = e1.x; let ecc = e1.y; let inc = e1.z; let node = e1.w;
   let w = e2.x;
-  let n = sqrt(132712.44 / (a * a * a));      // rad/s
+  let n = sqrt(132.71244 / (a * a * a));      // rad/s  (GM_SUN, Mm^3/s^2)
   var M = e2.y + n * BU.d2000 * 86400.0;
   M = M - floor(M / 6.2831853) * 6.2831853;
   var E = M + ecc * sin(M);

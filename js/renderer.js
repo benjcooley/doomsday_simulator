@@ -42,20 +42,24 @@ function ringMesh(inner, outer, segs = 160) {
 }
 
 export class Renderer {
-  async init(gpu, particleSystem) {
+  async init(gpu, particleSystem, opts = {}) {
     this.gpu = gpu;
     this.ps = particleSystem;
     const d = gpu.device;
 
     // textures
     this.tex = {};
-    const want = ['2k_stars_milky_way.jpg', '2k_sun.jpg', '2k_mercury.jpg', '2k_venus_atmosphere.jpg',
+    const want = ['2k_sun.jpg', '2k_mercury.jpg', '2k_venus_atmosphere.jpg',
       '2k_earth_daymap.jpg', '2k_earth_nightmap.jpg', '2k_earth_clouds.jpg', '2k_moon.jpg', '2k_mars.jpg',
       '2k_jupiter.jpg', '2k_saturn.jpg', '2k_saturn_ring_alpha.png', '2k_uranus.jpg', '2k_neptune.jpg',
       '2k_pluto.jpg'];
     await Promise.all(want.map(async (f) => {
       this.tex[f] = await gpu.loadTexture('assets/tex/' + f, { fallback: { color: '#556', noise: true } });
     }));
+    // Skybox: adaptive 8K/4K by GPU class, loaded WITHOUT mips (the shader samples level 0 only,
+    // and a black-hole lens will re-sample it by bent ray direction — full-res is what it warps).
+    this.skyTex = (opts.sky8k ? '8k' : '4k') + '_stars_milky_way.jpg';
+    this.tex[this.skyTex] = await gpu.loadTexture('assets/tex/' + this.skyTex, { mips: false, fallback: { color: '#223', noise: true } });
 
     // meshes
     const sm = sphereMesh();
@@ -74,7 +78,7 @@ export class Renderer {
     this.drawBuf = d.createBuffer({ size: this.drawStride * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'draws' });
     this.drawArr = new Float32Array(this.drawStride * 16 / 4);
     this.globeBuf = gpu.uniform(96, 'globe');
-    this.lineUBufs = { orbits: gpu.uniform(16, 'lu0'), trails: gpu.uniform(16, 'lu1'), aim: gpu.uniform(16, 'lu2') };
+    this.lineUBufs = { orbits: gpu.uniform(16, 'lu0'), trails: gpu.uniform(16, 'lu1'), aim: gpu.uniform(16, 'lu2'), ghost: gpu.uniform(16, 'lu3') };
     this.beltBuf = gpu.uniform(48, 'belt');
 
     // line vertex buffers
@@ -82,6 +86,8 @@ export class Renderer {
     this.orbitRanges = [];
     this.trailVB = d.createBuffer({ size: 16 * 320 * 16, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: 'trails' });
     this.trailRanges = [];
+    this.ghostVB = d.createBuffer({ size: 16 * 256 * 16, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: 'ghosts' });
+    this.ghostRanges = [];
     this.aimVB = d.createBuffer({ size: 16 * 1024, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: 'aim' });
     this.aimCount = 0;
 
@@ -213,6 +219,12 @@ export class Renderer {
   }
   clearTrails() { this.trailRanges = []; }
 
+  writeGhost(slotIdx, f32rgba, count) {
+    this.gpu.device.queue.writeBuffer(this.ghostVB, slotIdx * 256 * 16, f32rgba, 0, count * 4);
+    this.ghostRanges[slotIdx] = { start: slotIdx * 256, count };
+  }
+  clearGhosts() { this.ghostRanges = []; }
+
   writeAim(arrBytes, count) {
     // size is in Float32Array ELEMENTS (4 per vertex), not bytes
     if (count > 0) this.gpu.device.queue.writeBuffer(this.aimVB, 0, arrBytes, 0, count * 4);
@@ -319,7 +331,7 @@ export class Renderer {
     // stars
     pass.setPipeline(this.pStars);
     pass.setBindGroup(0, this._bg('f-stars', this.pStars, { list: [{ binding: 0, resource: { buffer: this.frameBuf } }] }));
-    pass.setBindGroup(1, this._bg('stars1', this.pStars, { group: 1, list: [{ binding: 0, resource: this.tex['2k_stars_milky_way.jpg'].createView() }, { binding: 1, resource: gpu.sampler }] }));
+    pass.setBindGroup(1, this._bg('stars1', this.pStars, { group: 1, list: [{ binding: 0, resource: this.tex[this.skyTex].createView() }, { binding: 1, resource: gpu.sampler }] }));
     pass.draw(3);
 
     // spheres (sun + planets)
@@ -453,6 +465,11 @@ export class Renderer {
       pass.setBindGroup(1, this._bg('lu-trails', this.pLines, { group: 1, list: [{ binding: 0, resource: { buffer: this.lineUBufs.trails } }] }));
       pass.setVertexBuffer(0, this.trailVB);
       for (const r of this.trailRanges) { if (r && r.count > 1) pass.draw(r.count, 1, r.start); }
+    }
+    if (scene.showGhosts && this.ghostRanges.length) {
+      pass.setBindGroup(1, this._bg('lu-ghost', this.pLines, { group: 1, list: [{ binding: 0, resource: { buffer: this.lineUBufs.ghost } }] }));
+      pass.setVertexBuffer(0, this.ghostVB);
+      for (const r of this.ghostRanges) { if (r && r.count > 1) pass.draw(r.count, 1, r.start); }
     }
     if (this.aimCount > 1) {
       pass.setBindGroup(1, this._bg('lu-aim', this.pLines, { group: 1, list: [{ binding: 0, resource: { buffer: this.lineUBufs.aim } }] }));

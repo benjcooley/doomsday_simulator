@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "doomsday",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["serve.py", "8413"],
+      "port": 8413
+    }
+  ]
+}

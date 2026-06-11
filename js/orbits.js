@@ -3,8 +3,8 @@
 
 export const AU = 149597.8707;          // Mm
 export const G_SIM = 6.674e-5;          // Mm^3 / (1e24 kg) / s^2
-export const GM_SUN = 132712.44;        // Mm^3/s^2  (1.32712440018e11 km^3/s^2 * 1e-9)
-export const GM_EARTH = 0.3986004;      // Mm^3/s^2
+export const GM_SUN = 132.71244;        // Mm^3/s^2  (1.32712440018e11 km^3/s^2 * 1e-9) == G_SIM * M_sun
+export const GM_EARTH = 3.986004e-4;    // Mm^3/s^2  (3.986004e5 km^3/s^2 * 1e-9) == G_SIM * M_earth
 export const OBLIQUITY = 23.43928 * Math.PI / 180;
 
 export function dateToJD(date) {

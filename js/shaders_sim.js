@@ -23,6 +23,8 @@ struct SimParams {
   heatGate: f32,
   settleDrag: f32,
   debugIdxBits: f32,   // bitcast u32 particle index to dump diagnostics for (0xffffffff = off)
+  consumedBits: f32,   // bitcast u32: bitmask of body slots the Sun has eaten (kill all their particles)
+  pad9: f32,
 }
 
 // per-body rigid reference motion (settle drag target): velocity, center, spin
@@ -257,7 +259,9 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
             let Tj = tVel[jj].w;
             let condS = smoothstep(2200.0, 3800.0, max(Ti, Tj));
             if (condS > 0.0 && aux.x > 0.0) {
-              var dq = (Tj - Ti) * min(0.25, P.dt * 4e-4 * condS) * w;
+              // exponential transfer fraction: exactly framerate- AND density-independent and
+              // unconditionally stable (never overshoots past equilibrium), unlike a min() clamp
+              var dq = (Tj - Ti) * (1.0 - exp(-P.dt * 4e-4 * condS)) * w;
               // receivers SATURATE in the orange band (1400-2100K): scorch halos hold a
               // visible white→orange→red gradient instead of equilibrating straight to
               // white. Only direct impact heating exceeds this ceiling.
@@ -270,7 +274,7 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
             if (matB.x > 0.5 && aux.y > 0.0) {
               let hotSide = max(Ti, Tj);
               if (hotSide > 1150.0 && hotSide < 2600.0) {
-                var dq2 = (Tj - Ti) * min(0.2, P.dt * 1.5e-4) * w;
+                var dq2 = (Tj - Ti) * (1.0 - exp(-P.dt * 1.5e-4)) * w;
                 if (dq2 > 0.0) { dq2 = dq2 * (1.0 - smoothstep(1100.0, 1700.0, Ti)); }
                 heat = heat + dq2;
               }
@@ -362,6 +366,15 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
 
   // adjacency count → meta bits 12-15: the renderer culls deeply-buried particles
   newMeta = (newMeta & ~(15u << 12u)) | (u32(min(dTouch, 15.0)) << 12u);
+
+  // THE SUN IS A UNIVERSAL DESTROYER — the CPU flags a whole body's slot once its path crosses
+  // the Sun's 5× kill radius, and every particle of that body is annihilated at once: all motion
+  // halted, mass→0 (gone from physics + render), parked dead-still at the Sun's center.
+  let consumed = bitcast<u32>(P.consumedBits);
+  if ((consumed & (1u << ((mymeta >> 4u) & 15u))) != 0u) {
+    p = P.sunPos; v = vec3f(0.0); mi = 0.0;
+    newMeta = newMeta | 4096u;
+  }
 
   posB[i] = vec4f(p, mi);
   velB[i] = vec4f(v, T);
