@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <title>☄ DOOMSDAY Simulator</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+// WebGPU only exists in secure contexts — force HTTPS everywhere except local dev.
+if (location.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(location.hostname)) {
+  location.replace('https://' + location.host + location.pathname + location.search);
+}
+</script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>

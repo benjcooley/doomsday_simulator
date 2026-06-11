@@ -55,8 +55,14 @@ async function profileGPU(gpu, ps) {
 async function start() {
   try {
     if (!navigator.gpu) {
-      fatal('WebGPU is not available in this browser.',
-        'DOOMSDAY needs WebGPU. Use a recent Chrome, Edge, or Arc — or Safari 26+ on macOS — with hardware acceleration enabled.');
+      if (!window.isSecureContext) {
+        // browsers hide navigator.gpu entirely on insecure (http) pages
+        fatal('WebGPU requires a secure connection (HTTPS).',
+          `Reload via https://${location.host}${location.pathname} — WebGPU is hidden on plain http even when the browser supports it.`);
+      } else {
+        fatal('WebGPU is not available in this browser.',
+          'DOOMSDAY needs WebGPU. Use a recent Chrome, Edge, or Arc — or Safari 26+ on macOS — with hardware acceleration enabled.');
+      }
       return;
     }
     const url = new URL(location.href);
