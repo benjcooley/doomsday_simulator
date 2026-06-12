@@ -9,6 +9,7 @@ import { vadd, vsub, vscale, vnorm, vcross, vlen, vdot, clamp, lerp, curve } fro
 
 const J2000 = 2451545.0;
 const EARTH_OMEGA = 7.2921159e-5;
+const EMPTY_F32 = new Float32Array(0);
 const CHICX_J = 4.2e23;
 
 export class Sim {
@@ -1089,22 +1090,31 @@ export class Sim {
       };
     }
 
-    // trails → renderer
+    // trails → renderer — rebuilt EVERY frame with a live HEAD vertex pinned to the body's
+    // centre, so between sampled points the last segment stretches to the planet itself and
+    // the seeded orbit + real path read as one continuous line INTO the body (no dangling gap).
     if (this.view.trails) {
       for (let i = 0; i < this.mirror.length && i < 15; i++) {
         const b = this.mirror[i];
-        if (!b.dirty) continue;
         b.dirty = false;
         const n = b.trail.length;
-        const arr = new ArrayBuffer(n * 16);
+        if (!n) { this.renderer.writeTrail(i, EMPTY_F32, 0); continue; }
+        const head = !(b.touched || b.consumed);          // ended trails draw as-is, no head
+        const nv = n + (head ? 1 : 0);
+        const arr = new ArrayBuffer(nv * 16);
         const f = new Float32Array(arr), u8 = new Uint8Array(arr);
         for (let k = 0; k < n; k++) {
           f[k * 4] = b.trail[k][0]; f[k * 4 + 1] = b.trail[k][1]; f[k * 4 + 2] = b.trail[k][2];
-          const a = Math.pow(k / Math.max(n - 1, 1), 1.5) * 0.85;
+          const a = Math.pow(k / Math.max(nv - 1, 1), 1.5) * 0.85;
           const o = k * 16 + 12;
           u8[o] = b.color[0] * 255; u8[o + 1] = b.color[1] * 255; u8[o + 2] = b.color[2] * 255; u8[o + 3] = a * 255;
         }
-        this.renderer.writeTrail(i, new Float32Array(arr), n);
+        if (head) {
+          f[n * 4] = b.pos[0]; f[n * 4 + 1] = b.pos[1]; f[n * 4 + 2] = b.pos[2];
+          const o = n * 16 + 12;
+          u8[o] = b.color[0] * 255; u8[o + 1] = b.color[1] * 255; u8[o + 2] = b.color[2] * 255; u8[o + 3] = 217;
+        }
+        this.renderer.writeTrail(i, new Float32Array(arr), nv);
       }
     }
 

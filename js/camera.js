@@ -4,7 +4,7 @@
 //   MANUAL — the moment you drag/zoom, the camera is yours and STAYS yours (it only keeps
 //            the focused body centered as it moves). It never grabs control back on a timer.
 //            Press Space (or click the pill) to return to the auto view.
-import { clamp, vlerp } from './mathx.js';
+import { clamp, vlerp, vadd, vsub, vlen } from './mathx.js';
 
 export class OrbitCamera {
   constructor(canvas) {
@@ -67,14 +67,30 @@ export class OrbitCamera {
 
   update(dt) {
     dt = Math.min(dt, 0.05);                   // a hitch must not teleport the camera
-    let desiredPos, desiredDist;
+    let desiredPos, desiredDist, key;
     if (!this.manual && !this.manualFocus && this.autoEnabled && this.autoTarget) {
       desiredPos = this.autoTarget.pos;        // cinematic framing owns both
       desiredDist = clamp(this.autoTarget.dist, this.minDist, this.maxDist);
+      key = 'auto';
     } else {
       desiredPos = this.getFocusPos ? this.getFocusPos() : this.focusPos;  // keep body centered
       desiredDist = this._targetDist;          // user-controlled zoom (or held in manual)
+      key = this.getFocusPos || 'self';
     }
+    // RIDE the target: add the target's own frame-to-frame motion to the camera FIRST, so a
+    // body's motion (orbits, time warp) never drags the view — the smoothing below eases only
+    // the transition offset (focus switches, cinematic re-aims), never the follow itself.
+    // Without this, the filter lags by v/rate: invisible at 60x, thousands of Mm at 1Mx warp.
+    if (this._lastKey === key && this._lastDesired) {
+      const d = vsub(desiredPos, this._lastDesired);
+      // a same-key jump far beyond the view scale is a RE-AIM (cinematic picked a new subject),
+      // not motion — let the smoothing ease it instead of hard-cutting
+      if (key !== 'auto' || vlen(d) < 6 * Math.max(desiredDist, this.dist)) {
+        this.focusPos = vadd(this.focusPos, d);
+      }
+    }
+    this._lastKey = key;
+    this._lastDesired = desiredPos.slice();
     // exact framerate-independent exponential smoothing
     this.focusPos = vlerp(this.focusPos, desiredPos, 1 - Math.exp(-5 * dt));
     this.dist += (desiredDist - this.dist) * (1 - Math.exp(-6 * dt));
