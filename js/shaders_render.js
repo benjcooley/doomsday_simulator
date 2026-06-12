@@ -9,6 +9,7 @@ struct Frame {
   camFwd: vec3f, exposure: f32,
   sunPosRel: vec3f, pixScale: f32,
   partOffset: vec3f, starBoost: f32,
+  misc: vec4f,   // x: hideMask — body slots whose particles sit under an opaque shell/globe
 }
 @group(0) @binding(0) var<uniform> F: Frame;
 `;
@@ -287,6 +288,12 @@ fn blackbody(T: f32) -> vec3f {
     return o;
   }
   let mt = pmeta[ii];
+  // shell cull: a body fully covered by its opaque textured shell/globe renders NO particles —
+  // kills the readback-lag shimmer behind the shell and saves the fill of an entire planet
+  if (((u32(F.misc.x) >> ((mt >> 4u) & 15u)) & 1u) != 0u) {
+    o.pos = vec4f(2e9, 2e9, 2.0, 1.0);
+    return o;
+  }
   // occlusion cull: deeply buried particles (11+ touching neighbors) can never be seen —
   // when an impact tears the surface open, exposed interior pops in automatically
   if (((mt >> 12u) & 15u) >= 11u) {

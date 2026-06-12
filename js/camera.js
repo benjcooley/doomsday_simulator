@@ -27,7 +27,12 @@ export class OrbitCamera {
     this.sunLock = true;            // bearing co-rotates with the focus→Sun line: the Sun stays
     this._sunBearing = null;        // put, and orbital motion reads as the skybox slowly turning
 
-    const takeControl = () => { this.manual = true; this.idle = false; };
+    const takeControl = () => {
+      // hand-off keeps the CURRENT framing: grabbing the camera must not change distance
+      // (the manual zoom target otherwise held a stale pre-cinematic value and lurched)
+      if (!this.manual) this._targetDist = this.dist;
+      this.manual = true; this.idle = false;
+    };
     canvas.addEventListener('pointerdown', (e) => {
       takeControl();
       this._drag = { x: e.clientX, y: e.clientY, id: e.pointerId };

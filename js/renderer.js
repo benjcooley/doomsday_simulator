@@ -73,8 +73,8 @@ export class Renderer {
     this.ringCount = rm.i.length;
 
     // uniforms
-    this.frameBuf = gpu.uniform(160, 'frame');
-    this.frameArr = new Float32Array(40);
+    this.frameBuf = gpu.uniform(176, 'frame');
+    this.frameArr = new Float32Array(44);
     this.drawStride = 256;
     this.drawBuf = d.createBuffer({ size: this.drawStride * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'draws' });
     this.drawArr = new Float32Array(this.drawStride * 16 / 4);
@@ -265,6 +265,7 @@ export class Renderer {
     F.set(fwd, 28); F[31] = scene.exposure;
     F.set(scene.sunPosRel, 32); F[35] = gpu.height / (2 * tanHalf);
     F.set(scene.partOffset, 36); F[39] = scene.starBoost;
+    F[40] = scene.hideMask || 0;   // body slots whose particles hide under an opaque shell/globe
     q.writeBuffer(this.frameBuf, 0, F);
 
     // per-draw uniforms (sun + planets + corona + ring)

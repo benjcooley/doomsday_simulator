@@ -51,6 +51,9 @@ export class Sim {
     this.warpUser = def.warp0 || 60;
     this.warpSmooth = this.warpUser;
     this.warpEff = this.warpUser;
+    // impactor trail frame, selectable per scenario — set BEFORE def.build() spawns anything.
+    // Default 'geo' (target/Earth-relative): it's Earth's gravity well they animate against.
+    this.impactorTrailFrame = def.impactorTrails || 'geo';
     this.paused = false;
     this.ps.reset();
     this.mirror = [];
@@ -122,8 +125,6 @@ export class Sim {
       this._addMirror('Moon', CATALOG.moon.M, CATALOG.moon.R, mp, mv, 1, [0.8, 0.8, 0.85], moonCanonical);
       const mm = this.mirror[this.mirror.length - 1];
       mm.shellTex = '2k_moon.jpg'; mm.shellFade = 1;
-      mm.trailFrame = 'geo';   // the Moon's trail is ABOUT its relation to Earth: record and
-                               // render Earth-relative (a loop that travels with Earth)
     }
 
     if (def.build) def.build(this._ctx());
@@ -145,7 +146,8 @@ export class Sim {
       // around the Sun with Earth — the "solar system orbits Earth" illusion.
       const M = arc.M;
       const seed = [];
-      for (let k = 1; k < M; k++) {     // chronological past, oldest first, ending at "now"
+      const k0 = Math.max(1, Math.ceil(M * 0.15));   // seed the trailing ~85% of one period —
+      for (let k = k0; k < M; k++) {                 // a visible gap; the trail never wraps closed
         const px = arc.pts[k * 3], py = arc.pts[k * 3 + 1], pz = arc.pts[k * 3 + 2];
         // helio bodies (Earth) seed heliocentric; geo bodies (Moon) seed in Earth-relative
         // coordinates — matching their per-body trailFrame
@@ -154,8 +156,9 @@ export class Sim {
       let circ = 0;
       for (let k = 1; k < seed.length; k++) circ += Math.hypot(seed[k][0] - seed[k - 1][0], seed[k][1] - seed[k - 1][1], seed[k][2] - seed[k - 1][2]);
       b.trail = seed;
-      b.trailStep = Math.max(b.R * 0.5, circ / M * 0.7);   // live appends continue arc density
-      b.dirty = true;
+      b.trailStep = Math.max(b.R * 0.5, circ / Math.max(seed.length, 1) * 0.7);  // live appends continue arc density
+      b.trailMax = Math.min(500, Math.ceil(seed.length * 1.1));  // length cap ≈ the seeded span:
+      b.dirty = true;                                            // stays shorter than one period
     }
 
     this.focusId = 'frame';   // frame mode is the default camera — it follows the action
@@ -169,6 +172,10 @@ export class Sim {
       name, M, R, pos: pos.slice(), vel: vel.slice(), slot, color, trail: [], trailAcc: 0,
       freezePos: pos.slice(), freezeVel: vel.slice(),
       canonical,   // on a real orbit? ghost predicted-orbit is only drawn for canonical bodies
+      // trail frame: Earth's trail is heliocentric (its fixed ellipse in space); EVERYTHING
+      // else — Moon, impactors — records target-relative (Earth-relative): the Moon's loop
+      // travels with Earth and an impactor's trail is its approach path toward the target.
+      trailFrame: slot === 0 ? 'helio' : 'geo',
     });
     if (this.frozen) this._wake = true;   // a new body always wakes the mechanics
   }
@@ -260,6 +267,9 @@ export class Sim {
       body = this.ps.addArmedImpactor(M, E, pos, vel, Math.max(R, 0.045), name);
     }
     this._addMirror(name, M, Math.max(R, 0.05), pos, vel, body.slot, recipe === 'comet' ? [0.5, 0.9, 1] : [1, 0.6, 0.3]);
+    // impactor trail frame is selectable PER SCENARIO (impactorTrails: 'geo'|'helio');
+    // default 'geo' = target(Earth)-relative — the readable approach path
+    this.mirror[this.mirror.length - 1].trailFrame = this.impactorTrailFrame || 'geo';
     this.vClampNeed = Math.max(this.vClampNeed || 1, vlen(vel) * 1.3);   // relativistic impactors
     const SHELLS = {
       mars: '2k_mars.jpg', jupiter: '2k_jupiter.jpg', earth2: '2k_earth_daymap.jpg',
@@ -722,7 +732,7 @@ export class Sim {
         : vadd(this.anchor.pos, b.pos);
       if (!last || vlen(vsub(cur, last)) > step) {
         b.trail.push(cur);
-        if (b.trail.length > 500) b.trail.shift();
+        while (b.trail.length > (b.trailMax || 500)) b.trail.shift();
         b.dirty = true;
       }
     }
@@ -1102,6 +1112,15 @@ export class Sim {
       }
     }
 
+    // particle hide-mask: bodies fully covered by an opaque shell (or Earth under its pristine
+    // globe) draw NO particles — no readback-lag shimmer behind the shell, and a whole planet
+    // of fill saved. The moment a shell starts fading (or the globe dissolving), particles return.
+    let hideMask = 0;
+    if (this.dissolve < 0.02) hideMask |= 1;
+    for (const b of this.mirror) {
+      if (b.slot > 0 && b.shellTex && b.shellFade > 0.9 && !b.consumed) hideMask |= (1 << b.slot);
+    }
+
     // pristine-blob shells (Moon, rogue Mars/Jupiter/Earth2): textured sphere until first violence
     for (const b of this.mirror) {
       if (!b.shellTex || b.slot === 0) continue;
@@ -1196,6 +1215,7 @@ export class Sim {
       showTrails: this.view.trails,
       showEjecta: this.view.ejecta,
       showGhosts,
+      hideMask,
       lineOffsets: { orbits: vscale(focus, -1), trails: vscale(focus, -1), aim: partOffset, ghost: [0, 0, 0] },
       lineAlphas: { orbits: 0.8, trails: 1, aim: 1, ghost: 0.85 },
       bloomStrength: this.view.bloom,
