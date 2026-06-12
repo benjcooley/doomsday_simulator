@@ -394,7 +394,7 @@ export class Sim {
     this.warpSmooth = Math.max(0.02, this.warpUser);
 
     // proximity from mirror → dt limits + cinematic auto-slow
-    let minGap = 1e12, closing = 0, gapSumR = 1, tWakeMin = Infinity, wakeNow = false, nearWake = false;
+    let minGap = 1e12, closing = 0, gapSumR = 1, tWakeMin = Infinity, tCloseMin = Infinity, wakeNow = false, nearWake = false;
     for (let i = 0; i < this.mirror.length; i++) {
       for (let j = i + 1; j < this.mirror.length; j++) {
         const a = this.mirror[i], b = this.mirror[j];
@@ -404,14 +404,20 @@ export class Sim {
         const gap = dist - a.R - b.R;
         const vr = vsub(b.vel, a.vel);
         const cl = -vdot(vr, d) / Math.max(dist, 1e-6);
-        // WAKE RULE, per pair: stay frozen until bodies are VERY CLOSE (2 radii) — unless the
-        // closing speed needs more run-up (~60 s of live approach). Evaluated over EVERY pair:
-        // the closest pair is often the (non-closing) Moon, which masked a 0.4c lance far out.
-        const wg = Math.max(2 * (a.R + b.R), cl > 0 ? cl * 60 : 0);
+        // WAKE RULE, per pair: stay frozen until bodies are VERY CLOSE (2 radii) — even for a
+        // 0.4c closer. The frozen cruise fine-steps the approach safely (its total advance is
+        // capped at time-to-wake, so overshoot is impossible), and once awake the per-body
+        // hyper-stepper handles the final beat. NO speed run-up term: that woke the particle
+        // sim 60 s (= 7200 Mm!) early for the Lance. Evaluated over EVERY pair: the closest
+        // pair is often the (non-closing) Moon, which would otherwise mask a distant closer.
+        const wg = 2 * (a.R + b.R);
         if (gap < wg) wakeNow = true;
         if (gap < wg * 1.6) nearWake = true;            // hysteresis band: don't re-freeze at the line
         // soonest time-to-wake over every closing pair — the frozen cruise must never step past it
         if (cl > 1e-9) tWakeMin = Math.min(tWakeMin, (gap - wg) / cl);
+        // soonest time-to-CONTACT — drives the cinematic slow-mo (time-based, so a 0.4c
+        // closer two minutes out engages it even while the Moon is the closest pair)
+        if (cl > 1e-9 && gap > 0) tCloseMin = Math.min(tCloseMin, gap / cl);
         if (gap < minGap) {
           minGap = gap;
           gapSumR = a.R + b.R;
@@ -421,9 +427,13 @@ export class Sim {
     }
 
     let warp = this.warpSmooth;
-    if (this.autoSlow && closing > 1e-9 && minGap > 0 && minGap < 30 * gapSumR) {
-      const tClose = minGap / closing;
-      warp = Math.min(warp, Math.max(120, tClose / 5));
+    // RELATIVISTIC MODE / cinematic slow-mo: engage on the usual proximity band OR whenever
+    // ANY closing pair is under two minutes from contact (time-based — the closest pair is
+    // often the non-closing Moon, which masked a 0.4c closer until two frames before impact).
+    // Floor of 2× (was 120×) so ultrafast closers play their approach in fine-stepped frozen
+    // slow-mo — the glint actually grows — at zero particle cost until the 2-radii wake shell.
+    if (this.autoSlow && ((closing > 1e-9 && minGap > 0 && minGap < 30 * gapSumR) || tCloseMin < 120)) {
+      warp = Math.min(warp, Math.max(2, tCloseMin / 5));
     }
     // carnage in slow-mo — and HOLD it: once contact has happened, the cap stays for as long
     // as the live physics runs (no sudden post-impact fast-forward when the fine-dt throttle
