@@ -137,18 +137,25 @@ export class Sim {
       if (b.slot === 0) arc = this.origArcs.find((a) => a.kind === 'earth');
       else if (b.canonical) arc = this.origArcs.find((a) => a.kind === 'moon' && a.slot === b.slot);
       if (!arc) continue;
-      const M = arc.M;
+      // trails live in HELIOCENTRIC space (same frame as the planet ghost arcs). Recording
+      // them in the Earth-co-moving local frame made every trail a position-relative-to-
+      // Earth's-frame-at-record-time: at high warp the seeded year-ellipse rode rigidly
+      // around the Sun with Earth — the "solar system orbits Earth" illusion.
+      const M = arc.M, eArc = this.origArcs.find((a) => a.kind === 'earth');
       const seed = [];
-      let circ = 0;
       for (let k = 1; k < M; k++) {     // chronological past, oldest first, ending at "now"
         const px = arc.pts[k * 3], py = arc.pts[k * 3 + 1], pz = arc.pts[k * 3 + 2];
-        // earth arc is heliocentric (→ local = pt − anchor); moon arc is geocentric about
-        // Earth, whose local position at load is the origin (→ local = pt)
-        seed.push(arc.frame === 'helio'
-          ? [px - this.anchor.pos[0], py - this.anchor.pos[1], pz - this.anchor.pos[2]]
-          : [px, py, pz]);
-        if (k > 1) circ += Math.hypot(px - arc.pts[(k - 1) * 3], py - arc.pts[(k - 1) * 3 + 1], pz - arc.pts[(k - 1) * 3 + 2]);
+        if (arc.frame === 'helio') seed.push([px, py, pz]);
+        else {
+          // geocentric moon point recorded τ ago → add Earth's helio position THEN, read
+          // off the earth arc (a full forward period ≡ the past, by periodicity)
+          const tau = (M - k) * arc.dt;
+          const j = ((eArc.M - Math.round(tau / eArc.dt)) % eArc.M + eArc.M) % eArc.M;
+          seed.push([px + eArc.pts[j * 3], py + eArc.pts[j * 3 + 1], pz + eArc.pts[j * 3 + 2]]);
+        }
       }
+      let circ = 0;
+      for (let k = 1; k < seed.length; k++) circ += Math.hypot(seed[k][0] - seed[k - 1][0], seed[k][1] - seed[k - 1][1], seed[k][2] - seed[k - 1][2]);
       b.trail = seed;
       b.trailStep = Math.max(b.R * 0.5, circ / M * 0.7);   // live appends continue arc density
       b.dirty = true;
@@ -709,8 +716,9 @@ export class Sim {
       }
       const last = b.trail.length ? b.trail[b.trail.length - 1] : null;
       const step = b.trailStep || Math.max(1.5, b.R * 0.5);
-      if (!last || vlen(vsub(b.pos, last)) > step) {
-        b.trail.push(b.pos.slice());
+      const cur = vadd(this.anchor.pos, b.pos);   // record HELIOCENTRIC, not co-moving local
+      if (!last || vlen(vsub(cur, last)) > step) {
+        b.trail.push(cur);
         if (b.trail.length > 500) b.trail.shift();
         b.dirty = true;
       }
@@ -724,7 +732,7 @@ export class Sim {
     for (const b of this.mirror) {
       b.pos = vsub(b.pos, rb.dp);
       b.vel = vsub(b.vel, rb.dv);
-      b.trail = b.trail.map((p) => vsub(p, rb.dp));
+      // trails are heliocentric — a local-frame rebase doesn't touch them
       b.dirty = true;
     }
     if (this.statsCache) for (const sb of this.statsCache.bodies) { sb.com = vsub(sb.com, rb.dp); sb.cov = vsub(sb.cov, rb.dv); }
@@ -1143,7 +1151,8 @@ export class Sim {
           u8[o] = b.color[0] * 255; u8[o + 1] = b.color[1] * 255; u8[o + 2] = b.color[2] * 255; u8[o + 3] = a * 255;
         }
         if (head) {
-          f[n * 4] = b.pos[0]; f[n * 4 + 1] = b.pos[1]; f[n * 4 + 2] = b.pos[2];
+          const hp = vadd(this.anchor.pos, b.pos);   // heliocentric, like the trail points
+          f[n * 4] = hp[0]; f[n * 4 + 1] = hp[1]; f[n * 4 + 2] = hp[2];
           const o = n * 16 + 12;
           u8[o] = b.color[0] * 255; u8[o + 1] = b.color[1] * 255; u8[o + 2] = b.color[2] * 255; u8[o + 3] = 217;
         }
@@ -1172,7 +1181,7 @@ export class Sim {
       showTrails: this.view.trails,
       showEjecta: this.view.ejecta,
       showGhosts,
-      lineOffsets: { orbits: vscale(focus, -1), trails: partOffset, aim: partOffset, ghost: [0, 0, 0] },
+      lineOffsets: { orbits: vscale(focus, -1), trails: vscale(focus, -1), aim: partOffset, ghost: [0, 0, 0] },
       lineAlphas: { orbits: 0.8, trails: 1, aim: 1, ghost: 0.85 },
       bloomStrength: this.view.bloom,
       bloomThresh: 1.4,
