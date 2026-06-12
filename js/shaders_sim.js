@@ -4,8 +4,13 @@
 // solar gravity/heating + radiative cooling + semi-implicit Euler integration.
 //
 // Units: length Mm, mass 1e24 kg, time s, temperature K. G = 6.674e-5.
+//
+// SHARED-CHUNK STRUCTURE: the physics lives in exported chunks consumed by BOTH engines —
+// this proven N² kernel below, and the fast grid engine (shaders_sim_fast.js). A physics
+// change lands once, both engines inherit it. Validated by test/stage5: the reassembled
+// N² kernel must produce identical results to the pre-split snapshot.
 
-export const SIM_WGSL = /* wgsl */`
+export const SIM_STRUCTS_WGSL = /* wgsl */`
 struct SimParams {
   dt: f32,
   nActive: u32,
@@ -36,7 +41,10 @@ struct BodyDyn { vc: vec4f, cp: vec4f, om: vec4f }
 // c = (Tvap, emis, visR, isGas)
 // d = (baseR, baseG, baseB, coolK)
 struct MatI { a: vec4f, b: vec4f, c: vec4f, d: vec4f }
+`;
 
+// group(0) binding layout — IDENTICAL in both engines so the integrate tail is shared verbatim
+export const SIM_BINDINGS_WGSL = /* wgsl */`
 @group(0) @binding(0) var<uniform> P: SimParams;
 @group(0) @binding(1) var<storage, read> mats: array<MatI, 16>;
 @group(0) @binding(2) var<storage, read> posA: array<vec4f>;
@@ -46,11 +54,9 @@ struct MatI { a: vec4f, b: vec4f, c: vec4f, d: vec4f }
 @group(0) @binding(6) var<storage, read_write> pmeta: array<u32>;
 @group(0) @binding(7) var<storage, read> bodyDyn: array<BodyDyn, 16>;
 @group(0) @binding(8) var<storage, read_write> dbg: array<vec4f, 8>;
+`;
 
-var<workgroup> tPos: array<vec4f, 256>;
-var<workgroup> tVel: array<vec4f, 256>;
-var<workgroup> tAux: array<vec4f, 256>;   // (radius [neg if armed], k, cohEff, damp)
-
+export const SIM_HELPERS_WGSL = /* wgsl */`
 fn meltOf(b: vec4f, c: vec4f, T: f32) -> f32 {
   return smoothstep(b.z, b.w, T);
 }
@@ -66,25 +72,20 @@ fn dampScale(b: vec4f, c: vec4f, T: f32) -> f32 {
   let vap = smoothstep(c.x * 0.8, c.x * 1.4, T);
   return mix(mix(1.0, 0.3, melt), 0.05, vap);
 }
+// neighbor's interaction properties, packed: (radius [neg if armed], k [neg if interior], cohEff, dampEff)
+fn neighborAux(mtj: u32, vtj: vec4f) -> vec4f {
+  let mj_ = mats[mtj & 15u];
+  var rj = mj_.a.x;
+  if ((mtj & 512u) != 0u) { rj = -rj; }
+  var kj = mj_.a.y;
+  if (mj_.b.x < 0.5) { kj = -kj; }   // sign of k encodes "j is interior material"
+  return vec4f(rj, kj, mj_.a.z * cohScale(mj_.b, mj_.c, vtj.w),
+    mj_.a.w * dampScale(mj_.b, mj_.c, vtj.w));
+}
+`;
 
-@compute @workgroup_size(256)
-fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lidv: vec3u) {
-  let i = gid.x;
-  let lid = lidv.x;
-  let isOn = i < P.nActive;
-
-  var pi = vec3f(0.0); var mi = 0.0;
-  var vi = vec3f(0.0); var Ti = 0.0;
-  var mymeta = 0u;
-  var radI = 0.0; var kI = 0.0; var cohI = 0.0; var dampI = 0.0; var heatKI = 0.0;
-  var matB = vec4f(0.0); var matC = vec4f(0.0); var coolK = 0.0;
-  var armedI = false;
-  var vapI = 0.0;
-
-  if (isOn) {
-    let pm = posA[i]; pi = pm.xyz; mi = pm.w;
-    let vt = velA[i]; vi = vt.xyz; Ti = vt.w;
-    mymeta = pmeta[i];
+// self-state material derivations (after pm/vt/meta of particle i are loaded)
+export const SELF_MATS_WGSL = /* wgsl */`
     let m = mats[mymeta & 15u];
     radI = m.a.x; kI = m.a.y; heatKI = m.b.y;
     matB = m.b; matC = m.c; coolK = m.d.w;
@@ -92,53 +93,25 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
     cohI = m.a.z * cohScale(matB, matC, Ti);
     vapI = smoothstep(matC.x * 0.8, matC.x * 1.4, Ti);   // vaporized fraction (drives plume pressure)
     dampI = m.a.w * dampScale(matB, matC, Ti);           // hot material loses solid damping
-  }
+`;
 
-  var acc = vec3f(0.0);
-  var dvContact = vec3f(0.0);   // contact-force velocity change, capped after the loop:
-                                // a particle buried among 50 neighbors must not sum 50 kicks
-  var heat = 0.0;
-  var nPayloadHits = 0.0;
-  // debug tap accumulators (only written out for the P.debugIdxBits particle)
-  var dContacts = 0.0;
-  var dTouch = 0.0;
-  var dMinVn = 0.0;
-  var dMaxHyp = 0.0;
-  var dMaxPen = 0.0;
-
-  for (var t = 0u; t < P.numTiles; t = t + 1u) {
-    let j = t * 256u + lid;
-    if (j < P.nActive) {
-      let pmj = posA[j];
-      let vtj = velA[j];
-      tPos[lid] = pmj;
-      tVel[lid] = vtj;
-      let mtj = pmeta[j];
-      let mj_ = mats[mtj & 15u];
-      var rj = mj_.a.x;
-      if ((mtj & 512u) != 0u) { rj = -rj; }
-      var kj = mj_.a.y;
-      if (mj_.b.x < 0.5) { kj = -kj; }   // sign of k encodes "j is interior material"
-      tAux[lid] = vec4f(rj, kj, mj_.a.z * cohScale(mj_.b, mj_.c, vtj.w),
-        mj_.a.w * dampScale(mj_.b, mj_.c, vtj.w));
-    } else {
-      tPos[lid] = vec4f(3e7, 3e7, 3e7, 0.0);
-      tVel[lid] = vec4f(0.0);
-      tAux[lid] = vec4f(0.001, 0.0, 0.0, 0.0);
-    }
-    workgroupBarrier();
-
-    if (isOn) {
-      for (var jj = 0u; jj < 256u; jj = jj + 1u) {
-        let pj = tPos[jj];
+// ---- THE pair interaction: the hard-won physics, single source for both engines ----
+// Wrapper contract: caller provides, in scope:
+//   pj   : vec4f — neighbor position + mass
+//   pvel : vec4f — neighbor velocity + temperature (or armed payload budget)
+//   aux  : vec4f — neighborAux() of the neighbor
+// plus particle-self state (pi, mi, vi, Ti, radI, kI, cohI, dampI, heatKI, matB, matC, vapI,
+// armedI) and accumulators (acc, dvContact, heat, nPayloadHits, dContacts, dTouch, dMinVn,
+// dMaxHyp, dMaxPen) — names exactly as declared in both kernels' preambles.
+export function pairPhysicsWGSL({ nearGravity = true } = {}) {
+  return /* wgsl */`
         let mj = pj.w;
         let d = pj.xyz - pi;
         let r2 = dot(d, d);
         if (mj > 0.0 && r2 > 1e-12) {
-          let invR = inverseSqrt(r2 + P.eps2);
+${nearGravity ? `          let invR = inverseSqrt(r2 + P.eps2);
           acc = acc + d * (P.gConst * mj * invR * invR * invR);
-
-          let aux = tAux[jj];
+` : ''}
           let rj = abs(aux.x);
           let armedJ = aux.x < 0.0;
           let h = radI + rj;
@@ -157,7 +130,7 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
             if (r2 < blast * blast) {
               let rr = sqrt(r2);
               let fall = 1.0 - rr / blast;
-              let Ej = tVel[jj].w;
+              let Ej = pvel.w;
               let frac = clamp(0.6 * P.dt, 0.0, 0.2);
               let chunk = Ej * frac * fall;
               heat = heat + chunk * heatKI / max(mi, 1e-12) * 0.5 * P.heatMul;
@@ -175,7 +148,7 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
             let cMax = 0.08 * mi / P.dt;
             let kp = min(min(kI, abs(aux.y)), kMax);
             let cohp = min(min(cohI, aux.z), kMax * 0.5);
-            let dv = tVel[jj].xyz - vi;
+            let dv = pvel.xyz - vi;
             let vn = dot(dv, n);
             let pen = h - r;
             // SHOCK-SOFTENING (telemetry-derived): impact kicks measured 1-7 km/s but decayed to
@@ -198,7 +171,7 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
               // the splash). The boost uses the PAIR's hotter side so hot vapor shoves cold
               // rock just as hard as it shoves itself (Newton's 3rd law — without this, the
               // impactor blows itself to orbit while the target never feels the blast).
-              let vapJ2 = smoothstep(matC.x * 0.8, matC.x * 1.4, tVel[jj].w);
+              let vapJ2 = smoothstep(matC.x * 0.8, matC.x * 1.4, pvel.w);
               let vapP = max(vapI, vapJ2);
               f = -kp * min(pen, 0.6 * radI * (1.0 + 8.0 * vapP));
             } else {
@@ -256,7 +229,7 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
             // heating after a big impact emerges from the worldwide fallback blanket.
             // Solid-on-solid does not conduct (real crust insulates for megayears), so the
             // pristine interior gradient can never cook the surface from below.
-            let Tj = tVel[jj].w;
+            let Tj = pvel.w;
             let condS = smoothstep(2200.0, 3800.0, max(Ti, Tj));
             if (condS > 0.0 && aux.x > 0.0) {
               // exponential transfer fraction: exactly framerate- AND density-independent and
@@ -282,13 +255,12 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
 
           }
         }
-      }
-    }
-    workgroupBarrier();
-  }
+`;
+}
 
-  if (!isOn) { return; }
-
+// ---- post-loop: sun gravity, contact-dv cap, settle drag, integrate, heat/cool, guards,
+// debug taps, occlusion bits, sun-eater, write-out. Shared verbatim by both engines. ----
+export const INTEGRATE_TAIL_WGSL = /* wgsl */`
   // sun gravity — DIFFERENTIAL (tidal): particle pull minus the frame anchor's pull, so the
   // Earth blob stays pinned at the origin instead of all particles sliding toward the Sun.
   // Must match the CPU mirror integration in sim.js.
@@ -379,6 +351,80 @@ fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) 
   posB[i] = vec4f(p, mi);
   velB[i] = vec4f(v, T);
   pmeta[i] = newMeta;
+`;
+
+// accumulator + self-state declarations shared by both kernels' preambles
+export const SELF_DECLS_WGSL = /* wgsl */`
+  var pi = vec3f(0.0); var mi = 0.0;
+  var vi = vec3f(0.0); var Ti = 0.0;
+  var mymeta = 0u;
+  var radI = 0.0; var kI = 0.0; var cohI = 0.0; var dampI = 0.0; var heatKI = 0.0;
+  var matB = vec4f(0.0); var matC = vec4f(0.0); var coolK = 0.0;
+  var armedI = false;
+  var vapI = 0.0;
+
+  var acc = vec3f(0.0);
+  var dvContact = vec3f(0.0);   // contact-force velocity change, capped after the loop:
+                                // a particle buried among 50 neighbors must not sum 50 kicks
+  var heat = 0.0;
+  var nPayloadHits = 0.0;
+  // debug tap accumulators (only written out for the P.debugIdxBits particle)
+  var dContacts = 0.0;
+  var dTouch = 0.0;
+  var dMinVn = 0.0;
+  var dMaxHyp = 0.0;
+  var dMaxPen = 0.0;
+`;
+
+// ================= the proven N² kernel, assembled from the shared chunks =================
+export const SIM_WGSL = /* wgsl */`
+${SIM_STRUCTS_WGSL}
+${SIM_BINDINGS_WGSL}
+var<workgroup> tPos: array<vec4f, 256>;
+var<workgroup> tVel: array<vec4f, 256>;
+var<workgroup> tAux: array<vec4f, 256>;   // (radius [neg if armed], k, cohEff, damp)
+${SIM_HELPERS_WGSL}
+@compute @workgroup_size(256)
+fn sim(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lidv: vec3u) {
+  let i = gid.x;
+  let lid = lidv.x;
+  let isOn = i < P.nActive;
+${SELF_DECLS_WGSL}
+  if (isOn) {
+    let pm = posA[i]; pi = pm.xyz; mi = pm.w;
+    let vt = velA[i]; vi = vt.xyz; Ti = vt.w;
+    mymeta = pmeta[i];
+${SELF_MATS_WGSL}
+  }
+
+  for (var t = 0u; t < P.numTiles; t = t + 1u) {
+    let j = t * 256u + lid;
+    if (j < P.nActive) {
+      let pmj = posA[j];
+      let vtj = velA[j];
+      tPos[lid] = pmj;
+      tVel[lid] = vtj;
+      tAux[lid] = neighborAux(pmeta[j], vtj);
+    } else {
+      tPos[lid] = vec4f(3e7, 3e7, 3e7, 0.0);
+      tVel[lid] = vec4f(0.0);
+      tAux[lid] = vec4f(0.001, 0.0, 0.0, 0.0);
+    }
+    workgroupBarrier();
+
+    if (isOn) {
+      for (var jj = 0u; jj < 256u; jj = jj + 1u) {
+        let pj = tPos[jj];
+        let pvel = tVel[jj];
+        let aux = tAux[jj];
+${pairPhysicsWGSL({ nearGravity: true })}
+      }
+    }
+    workgroupBarrier();
+  }
+
+  if (!isOn) { return; }
+${INTEGRATE_TAIL_WGSL}
 }
 
 // --- thermal-only step: O(N), unconditionally stable at ANY dt ---

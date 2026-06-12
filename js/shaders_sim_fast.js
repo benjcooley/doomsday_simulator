@@ -1,7 +1,8 @@
-// shaders_sim_fast.js — the FAST engine's grid passes (counting-sort spatial hash).
+// shaders_sim_fast.js — the FAST engine: counting-sort spatial hash + grid-walk force kernel.
 // Built stage-by-stage under test/: each pass has a bit-exact JS reference in the headless
 // harness before the next is added. The pair PHYSICS is shared with the proven engine
-// (see shaders_sim.js) — this file only contains the neighbor-finding machinery.
+// (imported from shaders_sim.js) — this file only adds the neighbor-finding machinery.
+import { SIM_STRUCTS_WGSL, SIM_BINDINGS_WGSL, SIM_HELPERS_WGSL, SELF_DECLS_WGSL, SELF_MATS_WGSL, pairPhysicsWGSL, INTEGRATE_TAIL_WGSL } from './shaders_sim.js';
 
 export const HASH_SIZE = 1 << 17;   // 131072 hash cells (open hash over unbounded space)
 
@@ -180,6 +181,84 @@ fn walkNeighbors(@builtin(global_invocation_id) gid: vec3u) {
   outISum[i] = isum;
 }
 `;
+
+// ---- stage 5: the fast FORCE kernel — shared pair physics around the validated walk ----
+// group(0) layout is IDENTICAL to the N² kernel (so sim params/buffers/tail are shared);
+// group(1) carries the grid structure built by the sort chain each substep.
+export function fastForceWGSL({ nearGravity = true } = {}) {
+  return /* wgsl */`
+${SIM_STRUCTS_WGSL}
+// FAST-engine binding variant: same group(0) slot numbers as the N² kernel, but the small
+// fixed tables (mats, bodyDyn) are UNIFORM buffers — WebGPU's baseline guarantees only
+// 8 storage buffers per stage, and the grid adds two more. This lands at exactly 8:
+// posA, velA, posB, velB, pmeta, dbg + offsetsF, sortedF.  (counts is redundant:
+// segment end == offsets[h+1], because offsets is an exclusive scan of the full table.)
+@group(0) @binding(0) var<uniform> P: SimParams;
+@group(0) @binding(1) var<uniform> mats: array<MatI, 16>;
+@group(0) @binding(2) var<storage, read> posA: array<vec4f>;
+@group(0) @binding(3) var<storage, read> velA: array<vec4f>;
+@group(0) @binding(4) var<storage, read_write> posB: array<vec4f>;
+@group(0) @binding(5) var<storage, read_write> velB: array<vec4f>;
+@group(0) @binding(6) var<storage, read_write> pmeta: array<u32>;
+@group(0) @binding(7) var<uniform> bodyDyn: array<BodyDyn, 16>;
+@group(0) @binding(8) var<storage, read_write> dbg: array<vec4f, 8>;
+struct FastGrid {
+  invCell: f32,
+  hashSize: u32,
+  pad0: f32,
+  pad1: f32,
+}
+${HASH_FNS}
+@group(1) @binding(0) var<uniform> FG: FastGrid;
+@group(1) @binding(1) var<storage, read> offsetsF: array<u32>;
+@group(1) @binding(2) var<storage, read> sortedF: array<u32>;
+${SIM_HELPERS_WGSL}
+@compute @workgroup_size(256)
+fn simFast(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= P.nActive) { return; }
+${SELF_DECLS_WGSL}
+  {
+    let pm = posA[i]; pi = pm.xyz; mi = pm.w;
+    let vt = velA[i]; vi = vt.xyz; Ti = vt.w;
+    mymeta = pmeta[i];
+${SELF_MATS_WGSL}
+  }
+
+  // 27-cell deduped walk (completeness + collision behavior validated in stage 4)
+  let cc = cellCoord(pi, FG.invCell);
+  var hashes: array<u32, 27>;
+  var nh = 0u;
+  for (var dz = -1; dz <= 1; dz = dz + 1) {
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+      for (var dx = -1; dx <= 1; dx = dx + 1) {
+        let hsh = cellHash(cc + vec3i(dx, dy, dz));
+        var dup = false;
+        for (var k2 = 0u; k2 < nh; k2 = k2 + 1u) {
+          if (hashes[k2] == hsh) { dup = true; break; }
+        }
+        if (!dup) { hashes[nh] = hsh; nh = nh + 1u; }
+      }
+    }
+  }
+
+  for (var k = 0u; k < nh; k = k + 1u) {
+    let hh = hashes[k];
+    let segStart = offsetsF[hh];
+    let segEnd = select(offsetsF[hh + 1u], P.nActive, hh + 1u >= FG.hashSize);
+    for (var s = segStart; s < segEnd; s = s + 1u) {
+      let j = sortedF[s];
+      if (j == i) { continue; }
+      let pj = posA[j];
+      let pvel = velA[j];
+      let aux = neighborAux(pmeta[j], pvel);
+${pairPhysicsWGSL({ nearGravity })}
+    }
+  }
+${INTEGRATE_TAIL_WGSL}
+}
+`;
+}
 
 // JS mirror of the WGSL hash — single source of truth for tests.
 // Math.fround replicates the GPU's f32 multiply exactly (IEEE: f32 op == fround(f64 op on f32 inputs)),
