@@ -1,6 +1,7 @@
 // main.js — boot + frame loop
 import { GPU } from './gpu.js';
 import { ParticleSystem } from './particles.js';
+import { FastParticleSystem } from './particles_fast.js';
 import { EjectaSystem } from './ejecta.js';
 import { Renderer } from './renderer.js';
 import { OrbitCamera } from './camera.js';
@@ -105,7 +106,11 @@ async function start() {
     }
 
     bootMsg('compiling physics kernels…');
-    const ps = await new ParticleSystem().init(gpu);
+    // ?kernel=fast selects the O(N·k) grid engine (validated in test/ stages 0-7);
+    // the proven N² engine remains the default — the deployed site cannot regress.
+    const useFast = url.searchParams.get('kernel') === 'fast';
+    const ps = await new (useFast ? FastParticleSystem : ParticleSystem)().init(gpu);
+    console.log(`physics engine: ${useFast ? 'FAST (grid+monopole)' : 'N² (proven)'}`);
 
     bootMsg('profiling GPU…');
     const prof = await profileGPU(gpu, ps);
@@ -220,6 +225,7 @@ async function start() {
       energyJ: sim.energyDisplay ? sim.energyDisplay.toExponential(2) : '0',
       contacts: [...sim.contacts], dissolve: +sim.dissolve.toFixed(2),
       scenario: sim.scenarioId, dist: Math.round(camera.dist),
+      engine: ps.isFast ? 'fast' : 'n2',
       bodies: sim.mirror.map((b) => ({
         n: b.name, d: +vlen(vsub(b.pos, sim.mirror[0].pos)).toFixed(1),
         v: +(vlen(b.vel) * 1000).toFixed(2), shell: b.shellFade ?? null,
