@@ -645,11 +645,11 @@ export class Sim {
     // first-contact clock — drives 'after:' headlines AND the held impact slow-mo
     if (this.contacts.size > 0 && !this._firstContactT) {
       this._firstContactT = this.simTime;
-      // pull the DIAL itself down to the slow-mo rate: the request was still sitting at the
-      // pre-impact cruise warp (e.g. Moonfall's 30000×), so the instant the aftermath froze,
-      // the throttle vanished and time snapped to warp speed. Now the held rate is the real
-      // request — it stays slow after the dust settles until the user pushes the dial up.
-      this.warpUser = Math.min(this.warpUser, 1500);
+      // pull the DIAL itself down to THE RATE YOU ARE WATCHING AT — the measured slow-mo of
+      // the approach (throttled physics), not an arbitrary cap. 1500× still read as warp
+      // speed for debris dynamics once the throttle eased. The held rate is now the real
+      // request — it stays this slow after the dust settles until the user pushes the dial.
+      this.warpUser = Math.min(this.warpUser, clamp(this.warpEff || 300, 30, 600));
     }
     // timed headlines
     for (const ev of this.events) {
