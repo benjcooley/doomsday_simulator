@@ -58,11 +58,29 @@ export class UI {
     const nowBtn = this._el('button', 'btn small', dateWrap, 'NOW');
     nowBtn.onclick = () => this.cb.loadScenario(this.sim.scenarioId, new Date().toISOString().slice(0, 16));
 
-    // --- TIME DIAL: pause + log slider (0.02× slow-mo … 1 month/s) + preset chips ---
+    // --- TIME: pause + a VALUE BUTTON that always shows the real (measured) timescale —
+    // "9.1× ◂ 60×" when live physics throttles below the requested rate. Clicking opens a
+    // dropdown with the preset chips, the cinematic toggle, and the fine log dial.
     const warpWrap = this._el('div', 'tb-group warps', tb);
+    this._el('span', 'tb-label', warpWrap, 'TIME');
     this.pauseBtn = this._el('button', 'btn warp', warpWrap, '⏸');
     this.pauseBtn.onclick = () => { this.sim.paused = !this.sim.paused; this._syncWarpBtns(); };
-    this.dial = this._el('input', 'time-dial', warpWrap);
+    this.warpBtn = this._el('button', 'btn warp value', warpWrap, '— ▾');
+    this.warpBtn.title = 'Timescale: what you are actually seeing (◂ shows the requested rate when live physics runs slower). Click to change.';
+    const wPanel = this._drop(warpWrap, this.warpBtn);
+    const chipRow = this._el('div', 'drop-row', wPanel);
+    this.warpBtns = WARP_CHIPS.map((w) => {
+      const b = this._el('button', 'btn warp chip', chipRow, w.label);
+      b.onclick = () => { this.sim.paused = false; this.setWarp(w.v); wPanel.style.display = 'none'; };
+      return { b, w };
+    });
+    this.autoSlowBtn = this._el('button', 'btn warp chip toggled', chipRow, '🎬');
+    this.autoSlowBtn.title = 'Cinematic auto slow-motion on approach';
+    this.autoSlowBtn.onclick = () => {
+      this.sim.autoSlow = !this.sim.autoSlow;
+      this.autoSlowBtn.classList.toggle('toggled', this.sim.autoSlow);
+    };
+    this.dial = this._el('input', 'time-dial', wPanel);
     this.dial.type = 'range'; this.dial.min = 0; this.dial.max = 1000; this.dial.step = 1;
     this.dial.title = 'Time dial — drag left for slow motion, right for time warp';
     this.dial.addEventListener('input', () => {
@@ -73,34 +91,51 @@ export class UI {
     // While the user holds the dial it's authoritative; otherwise it tracks the MEASURED rate.
     this.dial.addEventListener('pointerdown', () => { this._dialDrag = true; });
     window.addEventListener('pointerup', () => { this._dialDrag = false; });
-    this.warpBtns = WARP_CHIPS.map((w) => {
-      const b = this._el('button', 'btn warp chip', warpWrap, w.label);
-      b.onclick = () => { this.sim.paused = false; this.setWarp(w.v); };
-      return { b, w };
-    });
-    this.autoSlowBtn = this._el('button', 'btn warp toggled', warpWrap, '🎬');
-    this.autoSlowBtn.title = 'Cinematic auto slow-motion on approach';
-    this.autoSlowBtn.onclick = () => {
-      this.sim.autoSlow = !this.sim.autoSlow;
-      this.autoSlowBtn.classList.toggle('toggled', this.sim.autoSlow);
-    };
-    this.warpReadout = this._el('div', 'warp-readout', tb, '—');
 
-    // --- DENSITY: three machine-calibrated particle counts, labeled with the counts
-    // themselves (mid = the GPU profiler's pick, high = 3× it, low = ⅓). High particle
-    // counts change the sim's whole feel — surface this up top so people actually try it.
+    // --- DENSITY: a VALUE BUTTON showing the real particle count; the dropdown has three
+    // machine-calibrated presets (mid = the GPU profiler's pick, ⅓ and 3× around it) and the
+    // fine log dial at the bottom. High counts change the sim's whole feel — keep it up top.
     const densWrap = this._el('div', 'tb-group', tb);
     this._el('span', 'tb-label', densWrap, 'DENSITY');
+    const fmtQ = (n) => (n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : n);
+    this.densBtn = this._el('button', 'btn small value', densWrap, '— ▾');
+    this.densBtn.title = 'Particle count — click to change (rebuilds the scenario)';
+    const dPanel = this._drop(densWrap, this.densBtn);
     const mp = Math.max(8192, this.cb.machinePick || 16384);
     const rk = (n) => Math.round(clamp(n, 4096, 1048576) / 1000) * 1000;
-    const dk = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : n);
     this.densTiers = [rk(mp / 3), rk(mp), rk(mp * 3)];
+    const dRow = this._el('div', 'drop-row', dPanel);
     this.densBtns = this.densTiers.map((n, i) => {
-      const b = this._el('button', 'btn small dens', densWrap, dk(n));
-      b.title = `${n.toLocaleString()} particles — ${['light & fast', 'calibrated for this GPU', '3× the calibrated pick — the high-density feel'][i]} (rebuilds the scenario)`;
-      b.onclick = () => this._setQuality(n);
+      const b = this._el('button', 'btn small dens', dRow, fmtQ(n));
+      b.title = `${n.toLocaleString()} particles — ${['light & fast', 'calibrated for this GPU', '3× the calibrated pick — the high-density feel'][i]}`;
+      b.onclick = () => { this._setQuality(n); dPanel.style.display = 'none'; };
       return { b, n };
     });
+    // fine log dial (applied on release; rebuilds bodies). Fast engine scales to 1M;
+    // the reference N² engine is capped where it stays interactive.
+    const isFast = !!this.sim.ps.isFast;
+    const Q_MIN = 4000, Q_MAX = isFast ? 1048576 : 42000;
+    const qFromDial = (v) => Math.round(Math.exp(Math.log(Q_MIN) + (Math.log(Q_MAX) - Math.log(Q_MIN)) * (v / 1000)) / 1000) * 1000;
+    const dialFromQ = (q) => Math.round(1000 * (Math.log(Math.max(Q_MIN, Math.min(Q_MAX, q))) - Math.log(Q_MIN)) / (Math.log(Q_MAX) - Math.log(Q_MIN)));
+    const qSlideRow = this._el('div', 'drop-row', dPanel);
+    this.qDial = this._el('input', 'slider', qSlideRow);
+    this.qDial.type = 'range'; this.qDial.min = 0; this.qDial.max = 1000; this.qDial.step = 1;
+    this.qDial.title = isFast
+      ? 'Particle count (log scale, up to 1M) — higher = finer detail, slower. Rebuilds on release.'
+      : 'Particle count — the N² reference engine caps at 42k. Remove ?kernel=n2 for up to 1M.';
+    const qOut = this._el('span', 'sval', qSlideRow, '');
+    this.qDial.addEventListener('input', () => { qOut.textContent = fmtQ(qFromDial(parseInt(this.qDial.value))); });
+    this.qDial.addEventListener('change', () => this._setQuality(qFromDial(parseInt(this.qDial.value))));
+    // keep value button, dial, readout and preset highlights agreeing with sim.quality
+    this._qSync = () => {
+      this.qDial.value = dialFromQ(this.sim.quality);
+      qOut.textContent = fmtQ(this.sim.quality);
+      this.densBtn.textContent = fmtQ(this.sim.quality) + ' ▾';
+      for (const { b, n } of this.densBtns) {
+        b.classList.toggle('toggled', Math.abs(this.sim.quality - n) <= Math.max(1024, n * 0.06));
+      }
+    };
+    this._qSync();
 
     const focusWrap = this._el('div', 'tb-group', tb);
     this._el('span', 'tb-label', focusWrap, 'FOCUS');
@@ -252,36 +287,7 @@ export class UI {
     mkVS('Heat drama', 'heatMul', 0.2, 4, 0.1);
     mkVS('Cooling rate', 'coolMul', 0, 20000, 100);
     mkVS('Star brightness', 'starBoost', 0, 1.5, 0.05);
-    // particle-density dial: log-scale count, applied on release (changing it rebuilds bodies).
-    // Fast engine scales to 1M; the reference N² engine is capped where it stays interactive.
-    const qRow = this._el('div', 'srow', vw);
-    this._el('span', 'slabel', qRow, 'DENSITY');
-    const qOut = this._el('span', 'sval', qRow, '');
-    this.qDial = this._el('input', 'slider', qRow);
-    const isFast = !!this.sim.ps.isFast;
-    const Q_MIN = 4000, Q_MAX = isFast ? 1048576 : 42000;
-    this.qDial.type = 'range'; this.qDial.min = 0; this.qDial.max = 1000; this.qDial.step = 1;
-    const qFromDial = (v) => Math.round(Math.exp(Math.log(Q_MIN) + (Math.log(Q_MAX) - Math.log(Q_MIN)) * (v / 1000)) / 1000) * 1000;
-    const dialFromQ = (q) => Math.round(1000 * (Math.log(Math.max(Q_MIN, Math.min(Q_MAX, q))) - Math.log(Q_MIN)) / (Math.log(Q_MAX) - Math.log(Q_MIN)));
-    this.qDial.value = dialFromQ(this.sim.quality);
-    this.qDial.title = isFast
-      ? 'Particle count (log scale, up to 1M) — higher = finer detail, slower. Rebuilds on release.'
-      : 'Particle count — the N² reference engine caps at 42k. Remove ?kernel=n2 for up to 1M.';
-    const fmtQ = (n) => (n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : n);
-    qOut.textContent = fmtQ(this.sim.quality);
-    this.qDial.addEventListener('input', () => { qOut.textContent = fmtQ(qFromDial(parseInt(this.qDial.value))); });
-    this.qDial.addEventListener('change', () => this._setQuality(qFromDial(parseInt(this.qDial.value))));
-    // keep dial, readout and the topbar DENSITY buttons agreeing with sim.quality
-    this._qSync = () => {
-      this.qDial.value = dialFromQ(this.sim.quality);
-      qOut.textContent = fmtQ(this.sim.quality);
-      if (this.densBtns) {
-        for (const { b, n } of this.densBtns) {
-          b.classList.toggle('toggled', Math.abs(this.sim.quality - n) <= Math.max(1024, n * 0.06));
-        }
-      }
-    };
-    this._qSync();
+    // (particle density moved to the topbar DENSITY dropdown)
 
     // ---- HUD ----
     const hud = this._el('div', 'hud');
@@ -392,6 +398,28 @@ export class UI {
     this._syncWarpBtns();
   }
 
+  // value-button dropdown: panel opens under the button, closes on outside pointerdown,
+  // selecting a preset closes it, dragging a slider inside keeps it open
+  _drop(wrap, btn) {
+    const panel = this._el('div', 'tb-drop', wrap);
+    panel.style.display = 'none';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wasOpen = panel.style.display !== 'none';
+      document.querySelectorAll('.tb-drop').forEach((p) => { p.style.display = 'none'; });
+      panel.style.display = wasOpen ? 'none' : 'flex';
+    });
+    if (!this._dropCloser) {
+      this._dropCloser = true;
+      window.addEventListener('pointerdown', (ev) => {
+        document.querySelectorAll('.tb-drop').forEach((p) => {
+          if (!p.parentElement.contains(ev.target)) p.style.display = 'none';
+        });
+      });
+    }
+    return panel;
+  }
+
   // single path for ALL quality changes (topbar buttons + sidebar dial): rebuild in place
   // when it fits this session's buffers, relaunch with a bigger cap when it doesn't
   _setQuality(n) {
@@ -445,13 +473,16 @@ export class UI {
       // rate + state, and flags when the live physics is throttling below the dial setting.
       const physLive = !sim.frozen && sim.ps.activeN > 0;
       if (sim.paused) {
-        this.warpReadout.textContent = 'PAUSED';
-        this.warpReadout.title = '';
+        this.warpBtn.textContent = 'PAUSED ▾';
+        this.warpBtn.title = '';
       } else {
         const throttled = sim.warpEff < sim.warpUser * 0.7;
-        const tag = physLive ? ' · SIM' : ' · cruise';
-        this.warpReadout.textContent = this.fmtWarp(sim.warpEff) + tag;
-        this.warpReadout.title = (throttled ? `Dial set to ${this.fmtWarp(sim.warpUser)}; ` : '') +
+        // the button IS the readout: always the rate you're actually seeing; when live
+        // physics throttles below the request, show "actual ◂ requested"
+        this.warpBtn.textContent = (throttled
+          ? `${this.fmtWarp(sim.warpEff)} ◂ ${this.fmtWarp(sim.warpUser)}`
+          : this.fmtWarp(sim.warpEff)) + (physLive ? ' · SIM' : '') + ' ▾';
+        this.warpBtn.title = (throttled ? `Dial set to ${this.fmtWarp(sim.warpUser)}; ` : '') +
           (physLive ? 'collision physics is running — time is paced to what the GPU can render.'
                     : 'orbital cruise — particle sim paused; planetary motion at the dial rate until an impactor closes in.');
       }
