@@ -81,6 +81,9 @@ export class Sim {
     this._lastCumJ = 0;
     this.vClampNeed = 1;
     this._heatArmed = false;
+    this._firstContactT = null;   // else next scenario's 'after:' headlines fire instantly
+    this._burstV = null;
+    this._gateWhy = '';
     this.banner = null;
     this.headlineQueue = [];
     this.settleUntil = 1800;
@@ -417,7 +420,7 @@ export class Sim {
     // to relax under gravity with small timesteps — otherwise high warp takes giant steps and
     // the planet shock-heats itself white before anything even hits it.
     const settling = this.simTime < this.settleUntil;
-    if (settling) warp = Math.min(warp, 500);
+    if (settling && !this.frozen) warp = Math.min(warp, 500);   // cap only while actually live
     if (this.warpUser < warp) warp = this.warpUser;            // user slow-mo always wins
 
     // disturbance assessment → freeze (rigid ride-along) for calm high-warp travel
@@ -460,7 +463,10 @@ export class Sim {
           out.shifts.push({ slot: b.slot, dp: vsub(b.pos, b.freezePos), dv: vsub(b.vel, b.freezeVel) });
         }
       }
-    } else if (!settling && !disturbed && (minGap > SLEEP * gapSumR || allQuiet)) {
+    } else if (!disturbed && (minGap > SLEEP * gapSumR || (!settling && allQuiet))) {
+      // NOTE: the settle window no longer blocks freezing when every body is far apart —
+      // a scenario LOADS frozen (no visible churn at start, like cruise). The lattice
+      // relaxes later during the live approach window, held rigid by settle drag.
       this.frozen = true;             // sleep: capture the rigid reference, stop the sim
       for (const b of this.mirror) { b.freezePos = b.pos.slice(); b.freezeVel = b.vel.slice(); }
     }
