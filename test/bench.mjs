@@ -51,10 +51,10 @@ async function bench(n) {
 
   // --- fast (grid rebuild + force each rep, like production) ---
   const res = sortChainResources(device, chain, fix.pm, CELL);
-  const fg = new ArrayBuffer(16);
+  const fg = new ArrayBuffer(48);   // FastGrid is 48B (gravity fields unused when farGravity:false)
   new Float32Array(fg)[0] = 1 / CELL;
   new Uint32Array(fg)[1] = HASH_SIZE;
-  const pFast = await makePipeline(device, fastForceWGSL({ nearGravity: true }), 'simFast', 'fast');
+  const pFast = await makePipeline(device, fastForceWGSL({ nearGravity: true, farGravity: false }), 'simFast', 'fast');
   const bg0 = device.createBindGroup({
     layout: pFast.getBindGroupLayout(0),
     entries: [
@@ -66,7 +66,6 @@ async function bench(n) {
       { binding: 5, resource: { buffer: common.velB } },
       { binding: 6, resource: { buffer: common.meta } },
       { binding: 7, resource: { buffer: uniformBuf(device, new Float32Array(16 * 12), 'bd') } },
-      { binding: 8, resource: { buffer: common.dbg } },
     ],
   });
   const bg1 = device.createBindGroup({

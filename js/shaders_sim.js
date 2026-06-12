@@ -259,8 +259,10 @@ ${nearGravity ? `          let invR = inverseSqrt(r2 + P.eps2);
 }
 
 // ---- post-loop: sun gravity, contact-dv cap, settle drag, integrate, heat/cool, guards,
-// debug taps, occlusion bits, sun-eater, write-out. Shared verbatim by both engines. ----
-export const INTEGRATE_TAIL_WGSL = /* wgsl */`
+// debug taps, occlusion bits, sun-eater, write-out. Shared by both engines; the fast engine
+// omits the debug tap (its dbg storage slot is spent on the gravity monopole grid). ----
+export function integrateTailWGSL({ debugTap = true } = {}) {
+  return /* wgsl */`
   // sun gravity — DIFFERENTIAL (tidal): particle pull minus the frame anchor's pull, so the
   // Earth blob stays pinned at the origin instead of all particles sliding toward the Sun.
   // Must match the CPU mirror integration in sim.js.
@@ -327,7 +329,7 @@ export const INTEGRATE_TAIL_WGSL = /* wgsl */`
     newMeta = newMeta | 2048u;
   }
 
-  if (i == bitcast<u32>(P.debugIdxBits)) {
+${debugTap ? `  if (i == bitcast<u32>(P.debugIdxBits)) {
     dbg[0] = vec4f(dContacts, dMinVn, dMaxPen, dMaxHyp);
     dbg[1] = vec4f(dvContact, length(dvContact));
     dbg[2] = vec4f(acc * P.dt, heat);
@@ -335,7 +337,7 @@ export const INTEGRATE_TAIL_WGSL = /* wgsl */`
     dbg[4] = vec4f(P.dt, mi, radI, kI);
     dbg[5] = vec4f(vi, Ti);
   }
-
+` : ''}
   // adjacency count → meta bits 12-15: the renderer culls deeply-buried particles
   newMeta = (newMeta & ~(15u << 12u)) | (u32(min(dTouch, 15.0)) << 12u);
 
@@ -352,6 +354,10 @@ export const INTEGRATE_TAIL_WGSL = /* wgsl */`
   velB[i] = vec4f(v, T);
   pmeta[i] = newMeta;
 `;
+}
+
+// back-compat: the tail with debug taps (used by the N² kernel below)
+export const INTEGRATE_TAIL_WGSL = integrateTailWGSL({ debugTap: true });
 
 // accumulator + self-state declarations shared by both kernels' preambles
 export const SELF_DECLS_WGSL = /* wgsl */`

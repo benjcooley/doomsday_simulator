@@ -28,12 +28,12 @@ async function runFastOnce(fix, paramsAB, cellSize) {
   const bodyDyn = uniformBuf(device, new Float32Array(16 * 12), 'bodyDyn');
   const dbg = emptyBuf(device, 8 * 16, 'dbg');
   // grid uniform (group 1)
-  const fg = new ArrayBuffer(16);
+  const fg = new ArrayBuffer(48);   // FastGrid is 48B (gravity fields unused when farGravity:false)
   new Float32Array(fg)[0] = 1 / cellSize;
   new Uint32Array(fg)[1] = HASH_SIZE;
   const fgBuf = uniformBuf(device, new Uint32Array(fg), 'fg');
 
-  const pipe = await makePipeline(device, fastForceWGSL({ nearGravity: true }), 'simFast', 'fast');
+  const pipe = await makePipeline(device, fastForceWGSL({ nearGravity: true, farGravity: false }), 'simFast', 'fast');
   const bg0 = device.createBindGroup({
     layout: pipe.getBindGroupLayout(0),
     entries: [
@@ -45,7 +45,6 @@ async function runFastOnce(fix, paramsAB, cellSize) {
       { binding: 5, resource: { buffer: velB } },
       { binding: 6, resource: { buffer: metaBuf } },
       { binding: 7, resource: { buffer: bodyDyn } },
-      { binding: 8, resource: { buffer: dbg } },
     ],
   });
   const bg1 = device.createBindGroup({

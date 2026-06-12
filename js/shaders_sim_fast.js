@@ -2,7 +2,7 @@
 // Built stage-by-stage under test/: each pass has a bit-exact JS reference in the headless
 // harness before the next is added. The pair PHYSICS is shared with the proven engine
 // (imported from shaders_sim.js) — this file only adds the neighbor-finding machinery.
-import { SIM_STRUCTS_WGSL, SIM_BINDINGS_WGSL, SIM_HELPERS_WGSL, SELF_DECLS_WGSL, SELF_MATS_WGSL, pairPhysicsWGSL, INTEGRATE_TAIL_WGSL } from './shaders_sim.js';
+import { SIM_STRUCTS_WGSL, SIM_HELPERS_WGSL, SELF_DECLS_WGSL, SELF_MATS_WGSL, pairPhysicsWGSL, integrateTailWGSL } from './shaders_sim.js';
 
 export const HASH_SIZE = 1 << 17;   // 131072 hash cells (open hash over unbounded space)
 
@@ -182,17 +182,47 @@ fn walkNeighbors(@builtin(global_invocation_id) gid: vec3u) {
 }
 `;
 
-// ---- stage 5: the fast FORCE kernel — shared pair physics around the validated walk ----
-// group(0) layout is IDENTICAL to the N² kernel (so sim params/buffers/tail are shared);
-// group(1) carries the grid structure built by the sort chain each substep.
-export function fastForceWGSL({ nearGravity = true } = {}) {
+// ---- coarse gravity grid: 16³ mass monopoles in fixed point (deposit + clear) ----
+// CoM uses scale-cancelling ratios, so only the mass needs massScale to decode.
+export const GRAV_DEPOSIT_WGSL = /* wgsl */`
+struct DepositParams {
+  gOrigin: vec3f, gExtentInv: f32,
+  massScale: f32, nActive: u32, pad0: f32, pad1: f32,
+}
+@group(0) @binding(0) var<uniform> DP: DepositParams;
+@group(0) @binding(1) var<storage, read> posD: array<vec4f>;
+@group(0) @binding(2) var<storage, read_write> gravA: array<atomic<u32>>;   // 4096 cells × (mx,my,mz,m)
+
+@compute @workgroup_size(256)
+fn clearGrav(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x < 16384u) { atomicStore(&gravA[gid.x], 0u); }
+}
+
+@compute @workgroup_size(256)
+fn depositGrav(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= DP.nActive) { return; }
+  let pm = posD[i];
+  if (pm.w <= 0.0) { return; }
+  let pn = clamp((pm.xyz - DP.gOrigin) * DP.gExtentInv, vec3f(0.0), vec3f(0.999999));
+  let ci = vec3u(pn * 16.0);
+  let flat = (ci.x + ci.y * 16u + ci.z * 256u) * 4u;
+  let mfp = u32(pm.w * DP.massScale);
+  atomicAdd(&gravA[flat + 0u], u32(f32(mfp) * pn.x));
+  atomicAdd(&gravA[flat + 1u], u32(f32(mfp) * pn.y));
+  atomicAdd(&gravA[flat + 2u], u32(f32(mfp) * pn.z));
+  atomicAdd(&gravA[flat + 3u], mfp);
+}
+`;
+
+// ---- stage 5/6: the fast FORCE kernel — shared pair physics around the validated walk,
+// plus tiled 16³-monopole far gravity. group(0) keeps the N² slot numbers, but mats and
+// bodyDyn are UNIFORM and there is no dbg slot — WebGPU's baseline guarantees only 8
+// storage buffers per stage, and this lands exactly there:
+// posA, velA, posB, velB, pmeta + offsetsF, sortedF, gravCells.
+export function fastForceWGSL({ nearGravity = false, farGravity = true } = {}) {
   return /* wgsl */`
 ${SIM_STRUCTS_WGSL}
-// FAST-engine binding variant: same group(0) slot numbers as the N² kernel, but the small
-// fixed tables (mats, bodyDyn) are UNIFORM buffers — WebGPU's baseline guarantees only
-// 8 storage buffers per stage, and the grid adds two more. This lands at exactly 8:
-// posA, velA, posB, velB, pmeta, dbg + offsetsF, sortedF.  (counts is redundant:
-// segment end == offsets[h+1], because offsets is an exclusive scan of the full table.)
 @group(0) @binding(0) var<uniform> P: SimParams;
 @group(0) @binding(1) var<uniform> mats: array<MatI, 16>;
 @group(0) @binding(2) var<storage, read> posA: array<vec4f>;
@@ -201,61 +231,93 @@ ${SIM_STRUCTS_WGSL}
 @group(0) @binding(5) var<storage, read_write> velB: array<vec4f>;
 @group(0) @binding(6) var<storage, read_write> pmeta: array<u32>;
 @group(0) @binding(7) var<uniform> bodyDyn: array<BodyDyn, 16>;
-@group(0) @binding(8) var<storage, read_write> dbg: array<vec4f, 8>;
 struct FastGrid {
-  invCell: f32,
-  hashSize: u32,
-  pad0: f32,
-  pad1: f32,
+  invCell: f32, hashSize: u32, massScale: f32, soft2: f32,
+  gOrigin: vec3f, gExtentInv: f32,
+  gExtent: f32, pad5: f32, pad6: f32, pad7: f32,
 }
 ${HASH_FNS}
 @group(1) @binding(0) var<uniform> FG: FastGrid;
 @group(1) @binding(1) var<storage, read> offsetsF: array<u32>;
 @group(1) @binding(2) var<storage, read> sortedF: array<u32>;
+@group(1) @binding(3) var<storage, read> gravCells: array<vec4<u32>, 4096>;
 ${SIM_HELPERS_WGSL}
+var<workgroup> gTile: array<vec4f, 256>;   // decoded (CoM xyz, mass) cells
+
 @compute @workgroup_size(256)
-fn simFast(@builtin(global_invocation_id) gid: vec3u) {
+fn simFast(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lidv: vec3u) {
   let i = gid.x;
-  if (i >= P.nActive) { return; }
+  let lid = lidv.x;
+  let isOn = i < P.nActive;
 ${SELF_DECLS_WGSL}
-  {
+  if (isOn) {
     let pm = posA[i]; pi = pm.xyz; mi = pm.w;
     let vt = velA[i]; vi = vt.xyz; Ti = vt.w;
     mymeta = pmeta[i];
 ${SELF_MATS_WGSL}
   }
 
-  // 27-cell deduped walk (completeness + collision behavior validated in stage 4)
-  let cc = cellCoord(pi, FG.invCell);
-  var hashes: array<u32, 27>;
-  var nh = 0u;
-  for (var dz = -1; dz <= 1; dz = dz + 1) {
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-      for (var dx = -1; dx <= 1; dx = dx + 1) {
-        let hsh = cellHash(cc + vec3i(dx, dy, dz));
-        var dup = false;
-        for (var k2 = 0u; k2 < nh; k2 = k2 + 1u) {
-          if (hashes[k2] == hsh) { dup = true; break; }
+  if (isOn) {
+    // 27-cell deduped walk (completeness + collision behavior validated in stage 4)
+    let cc = cellCoord(pi, FG.invCell);
+    var hashes: array<u32, 27>;
+    var nh = 0u;
+    for (var dz = -1; dz <= 1; dz = dz + 1) {
+      for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+          let hsh = cellHash(cc + vec3i(dx, dy, dz));
+          var dup = false;
+          for (var k2 = 0u; k2 < nh; k2 = k2 + 1u) {
+            if (hashes[k2] == hsh) { dup = true; break; }
+          }
+          if (!dup) { hashes[nh] = hsh; nh = nh + 1u; }
         }
-        if (!dup) { hashes[nh] = hsh; nh = nh + 1u; }
+      }
+    }
+    for (var k = 0u; k < nh; k = k + 1u) {
+      let hh = hashes[k];
+      let segStart = offsetsF[hh];
+      let segEnd = select(offsetsF[hh + 1u], P.nActive, hh + 1u >= FG.hashSize);
+      for (var s = segStart; s < segEnd; s = s + 1u) {
+        let j = sortedF[s];
+        if (j == i) { continue; }
+        let pj = posA[j];
+        let pvel = velA[j];
+        let aux = neighborAux(pmeta[j], pvel);
+${pairPhysicsWGSL({ nearGravity })}
       }
     }
   }
-
-  for (var k = 0u; k < nh; k = k + 1u) {
-    let hh = hashes[k];
-    let segStart = offsetsF[hh];
-    let segEnd = select(offsetsF[hh + 1u], P.nActive, hh + 1u >= FG.hashSize);
-    for (var s = segStart; s < segEnd; s = s + 1u) {
-      let j = sortedF[s];
-      if (j == i) { continue; }
-      let pj = posA[j];
-      let pvel = velA[j];
-      let aux = neighborAux(pmeta[j], pvel);
-${pairPhysicsWGSL({ nearGravity })}
+${farGravity ? `
+  // far gravity: all 4096 coarse monopoles, tiled through workgroup memory. Gravity comes
+  // ENTIRELY from these cells (near-gravity in the pair chunk is off), softened at ~half a
+  // coarse cell so own-cell/self attraction cannot spike. Barriers are workgroup-uniform.
+  for (var t = 0u; t < 16u; t = t + 1u) {
+    let c4 = gravCells[t * 256u + lid];
+    var cm = vec4f(0.0);
+    if (c4.w > 0u) {
+      let inv = 1.0 / f32(c4.w);                       // CoM ratio — fixed-point scale cancels
+      cm = vec4f(FG.gOrigin + vec3f(f32(c4.x), f32(c4.y), f32(c4.z)) * inv * FG.gExtent,
+        f32(c4.w) / FG.massScale);
     }
+    gTile[lid] = cm;
+    workgroupBarrier();
+    if (isOn) {
+      for (var jj = 0u; jj < 256u; jj = jj + 1u) {
+        let cell = gTile[jj];
+        if (cell.w > 0.0) {
+          let dg = cell.xyz - pi;
+          let r2g = dot(dg, dg) + FG.soft2;
+          let invRg = inverseSqrt(r2g);
+          acc = acc + dg * (P.gConst * cell.w * invRg * invRg * invRg);
+        }
+      }
+    }
+    workgroupBarrier();
   }
-${INTEGRATE_TAIL_WGSL}
+` : ''}
+  if (!isOn) { return; }
+${integrateTailWGSL({ debugTap: false })}
 }
 `;
 }
