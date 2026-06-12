@@ -122,6 +122,8 @@ export class Sim {
       this._addMirror('Moon', CATALOG.moon.M, CATALOG.moon.R, mp, mv, 1, [0.8, 0.8, 0.85], moonCanonical);
       const mm = this.mirror[this.mirror.length - 1];
       mm.shellTex = '2k_moon.jpg'; mm.shellFade = 1;
+      mm.trailFrame = 'geo';   // the Moon's trail is ABOUT its relation to Earth: record and
+                               // render Earth-relative (a loop that travels with Earth)
     }
 
     if (def.build) def.build(this._ctx());
@@ -145,15 +147,9 @@ export class Sim {
       const seed = [];
       for (let k = 1; k < M; k++) {     // chronological past, oldest first, ending at "now"
         const px = arc.pts[k * 3], py = arc.pts[k * 3 + 1], pz = arc.pts[k * 3 + 2];
-        if (arc.frame === 'helio') seed.push([px, py, pz]);
-        else {
-          // geocentric moon point recorded τ ago → add Earth's helio position AT THAT MOMENT
-          // (analytic ephemeris — per-point, smooth). Snapping to coarse arc samples here
-          // produced staircases of pure geocentric loop: "the Moon's trail orbits Earth".
-          const tau = (M - k) * arc.dt;
-          const ep = planetPos('earth', this.jd0 - tau / 86400);
-          seed.push([px + ep[0], py + ep[1], pz + ep[2]]);
-        }
+        // helio bodies (Earth) seed heliocentric; geo bodies (Moon) seed in Earth-relative
+        // coordinates — matching their per-body trailFrame
+        seed.push([px, py, pz]);
       }
       let circ = 0;
       for (let k = 1; k < seed.length; k++) circ += Math.hypot(seed[k][0] - seed[k - 1][0], seed[k][1] - seed[k - 1][1], seed[k][2] - seed[k - 1][2]);
@@ -720,7 +716,10 @@ export class Sim {
       }
       const last = b.trail.length ? b.trail[b.trail.length - 1] : null;
       const step = b.trailStep || Math.max(1.5, b.R * 0.5);
-      const cur = vadd(this.anchor.pos, b.pos);   // record HELIOCENTRIC, not co-moving local
+      // per-body trail frame: 'geo' records Earth-relative (Moon), default heliocentric
+      const cur = b.trailFrame === 'geo'
+        ? vsub(b.pos, this.mirror[0].pos)
+        : vadd(this.anchor.pos, b.pos);
       if (!last || vlen(vsub(cur, last)) > step) {
         b.trail.push(cur);
         if (b.trail.length > 500) b.trail.shift();
@@ -1155,8 +1154,13 @@ export class Sim {
         const nv = n + (head ? 1 : 0);
         const arr = new ArrayBuffer(nv * 16);
         const f = new Float32Array(arr), u8 = new Uint8Array(arr);
+        // geo-frame trails (Moon) are stored Earth-relative — bake Earth's CURRENT helio
+        // position in at upload (trails rebuild every frame, so this is free): the loop
+        // travels with Earth. Helio trails bake nothing and stay fixed in space.
+        const fo = b.trailFrame === 'geo'
+          ? vadd(this.anchor.pos, this.mirror[0].pos) : [0, 0, 0];
         for (let k = 0; k < n; k++) {
-          f[k * 4] = b.trail[k][0]; f[k * 4 + 1] = b.trail[k][1]; f[k * 4 + 2] = b.trail[k][2];
+          f[k * 4] = b.trail[k][0] + fo[0]; f[k * 4 + 1] = b.trail[k][1] + fo[1]; f[k * 4 + 2] = b.trail[k][2] + fo[2];
           const a = Math.pow(k / Math.max(nv - 1, 1), 1.5) * 0.85;
           const o = k * 16 + 12;
           u8[o] = b.color[0] * 255; u8[o + 1] = b.color[1] * 255; u8[o + 2] = b.color[2] * 255; u8[o + 3] = a * 255;
