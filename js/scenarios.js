@@ -149,7 +149,7 @@ export const SCENARIOS = [
   {
     id: 'spiral', title: 'Death Spiral', skulls: 5,
     blurb: 'The Moon loses 72% of its orbital speed and drops into a plunging ellipse. Five days later it swings through the Roche limit at three Earth-radii — and the tides take it apart on live television.',
-    warp0: 50000, focus: 'body:Moon', camDist: 70, moon: { velScale: 0.28 },
+    warp0: 50000, focus: 'body:Moon', camDist: 70, moon: { velScale: 0.24 },
     headlines: [
       { t: 2, text: 'Moon braking inexplicably. Orbit now "more of a dive"' },
       { t: 86400, text: 'Perigee forecast revised from 363,000 km to 16,000 km' },
@@ -173,7 +173,10 @@ export const SCENARIOS = [
       const T = 60000, dt = 600;
       const a = ctx.predict('Moon', 2 * T), b = ctx.predict('Moon', 2 * T - dt);
       const vel = [(b[0] - a[0]) / dt, (b[1] - a[1]) / dt, (b[2] - a[2]) / dt];
-      ctx.spawnImpactor({ recipe: 'moon', d_km: 3474, pos: a, vel, name: 'Anti-Moon', countScale: 3 });
+      // 25% over-massive: splash/bounce losses leave the wreck slightly RETROGRADE instead of
+      // slightly prograde — residual ~10% of orbital speed puts perigee below the surface, so
+      // the fall ends in an impact, not a graze into a skinny ellipse
+      ctx.spawnImpactor({ recipe: 'moon', d_km: 3742, pos: a, vel, name: 'Anti-Moon', countScale: 3 });
     },
     headlines: [
       { t: 2, text: 'Second Moon detected, inbound on the first Moon’s lane. Phase: waning hostile.' },

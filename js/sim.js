@@ -423,7 +423,12 @@ export class Sim {
     // at any warp, on any machine. It WAKES (starts the particle sim) when bodies close to
     // within WAKE radii, so the final approach + impact run fully live. This reuses the exact
     // freeze path already used for aftermath sleep; it just triggers on proximity, not warp.
-    const dtCap = clamp(this.ps.dtStable * 2, 2, 8);
+    // Live-physics dt ceiling must TRACK particle size: dtStable ∝ N^(-1/3) (smaller particles,
+    // stiffer relative springs). The old hard floor of 2 s sat ~5× over dtStable at 42k (stable
+    // thanks to the in-shader k/damp clamps) but ~12× over at 500k — marginal pairs pump energy
+    // every step and the planet eventually detonates at rest. Keep the same 5× margin at every N
+    // instead: identical behavior at 42k, proportionally finer steps at half a million particles.
+    const dtCap = clamp(this.ps.dtStable * 5, 0.3, 8);
     const WAKE = 4, SLEEP = 6;        // hysteresis, in units of (Ra + Rb)
     if (this._wake && this.frozen) { this._wake = false; this.frozen = false; }
     if (this.frozen) {

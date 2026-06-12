@@ -85,7 +85,10 @@ async function start() {
     const url = new URL(location.href);
     const qTiers = { low: 8192, med: 16384, high: 32768, ultra: 65536, mega: 131072, insane: 262144, ludicrous: 524288 };
     const qRaw = url.searchParams.get('q');
-    const qOverride = qTiers[qRaw] || (Math.min(524288, Math.max(4096, parseInt(qRaw) || 0)) || null);
+    // null ?q= MUST yield null (let the profiler pick) — the old fallback chain collapsed
+    // "no param" to 4096, silently overriding the profiler for every visitor
+    const qOverride = qRaw === null ? null
+      : (qTiers[qRaw] || Math.min(1048576, Math.max(4096, parseInt(qRaw) || 16384)));
 
     bootMsg('acquiring GPU…');
     let gpu;
