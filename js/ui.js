@@ -379,8 +379,13 @@ export class UI {
 
   _focus(id, user = true) {
     const t = this.sim.focusTargets().find((x) => x.id === id) || { R: 6.4 };
-    // snap to a sensible default distance for the body (≈4.5 radii); user picks jump instantly.
-    this.camera.focusOn(this.sim.focusPosFn(id), t.R, { dist: t.R * 4.5, user });
+    // FRAME is a mode, not a body: never set manualFocus for it, so the cinematic framing
+    // keeps owning position+distance until the user actually drags/zooms — and even then
+    // the orbit centre stays the frame centre (no jerk back to an Earth-follow camera).
+    const isFrame = id === 'frame';
+    this.camera.focusOn(this.sim.focusPosFn(id), t.R,
+      { dist: isFrame ? this.sim.camHint.dist : t.R * 4.5, user: user && !isFrame, frame: isFrame });
+    if (isFrame) this.camera.manual = false;     // re-picking FRAME hands control back
     this.focusSel.value = id;
   }
 

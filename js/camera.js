@@ -59,6 +59,7 @@ export class OrbitCamera {
     this.minDist = Math.max(0.4, radius * 1.25);
     this.manual = false;                       // an explicit pick returns to auto-follow
     this.manualFocus = !!opts.user;            // a user pick overrides cinematic auto-framing
+    this._frameMode = !!opts.frame;            // following a cinematic frame centre (may re-aim in jumps)
     if (opts.dist) this._targetDist = clamp(opts.dist, this.minDist, this.maxDist);
     if (this._targetDist < this.minDist) this._targetDist = this.minDist * 3;
     if (opts.jump || opts.user) {              // user picks SNAP straight to the body
@@ -85,9 +86,11 @@ export class OrbitCamera {
     // Without this, the filter lags by v/rate: invisible at 60x, thousands of Mm at 1Mx warp.
     if (this._lastKey === key && this._lastDesired) {
       const d = vsub(desiredPos, this._lastDesired);
-      // a same-key jump far beyond the view scale is a RE-AIM (cinematic picked a new subject),
-      // not motion — let the smoothing ease it instead of hard-cutting
-      if (key !== 'auto' || vlen(d) < 6 * Math.max(desiredDist, this.dist)) {
+      // a same-key jump far beyond the view scale is a RE-AIM (cinematic picked a new
+      // subject), not motion — ease it instead of hard-cutting. Only cinematic/frame
+      // targets can re-aim; real bodies move continuously, so they always co-move.
+      const canJump = key === 'auto' || this._frameMode;
+      if (!canJump || vlen(d) < 6 * Math.max(desiredDist, this.dist)) {
         this.focusPos = vadd(this.focusPos, d);
       }
     }

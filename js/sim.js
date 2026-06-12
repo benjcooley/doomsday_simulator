@@ -161,7 +161,8 @@ export class Sim {
       b.dirty = true;
     }
 
-    this.focusId = def.focus || 'earth';
+    this.focusId = 'frame';   // frame mode is the default camera — it follows the action
+    this.scenarioFocus = def.focus || 'earth';   // scenario hint, available in the dropdown
     this.camHint = { dist: def.camDist || 40 };
     this.statusText = 'SIMULATION READY';
   }
@@ -911,7 +912,8 @@ export class Sim {
   jdNow() { return this.jd0 + this.simTime / 86400; }
 
   focusTargets() {
-    const t = [{ id: 'earth', name: 'Earth', R: CATALOG.earth.R }];
+    const t = [{ id: 'frame', name: '◆ Frame (auto)', R: CATALOG.earth.R },
+      { id: 'earth', name: 'Earth', R: CATALOG.earth.R }];
     for (const b of this.mirror) if (b.name !== 'Earth') t.push({ id: 'body:' + b.name, name: b.name, R: Math.max(b.R, 0.3) });
     t.push({ id: 'sun', name: 'Sun', R: 695.7 });
     for (const n of PLANET_NAMES) if (n !== 'earth') t.push({ id: 'planet:' + n, name: CATALOG[n].name, R: CATALOG[n].R });
@@ -1043,6 +1045,12 @@ export class Sim {
   }
 
   focusPosFn(id) {
+    // FRAME mode: the focus target IS the cinematic frame centre. Dragging/zooming then
+    // orbits that centre instead of jerking the camera back to the Earth-follow target.
+    if (id === 'frame') return () => {
+      const ft = this.autoFrameTarget();
+      return ft ? ft.pos : vadd(this.anchor.pos, this.mirror[0].pos);
+    };
     if (id === 'sun') return () => [0, 0, 0];
     if (id.startsWith('planet:')) {
       const n = id.slice(7);
