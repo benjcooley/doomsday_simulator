@@ -57,7 +57,7 @@ export const SCENARIOS = [
   {
     id: 'theia', title: 'Theia II: Moon-Maker', skulls: 5,
     blurb: 'A Mars-sized protoplanet on a grazing trajectory — the same impact that made the Moon 4.5 Gyr ago. Watch a debris ring form.',
-    warp0: 1200, focus: 'earth', camDist: 220,
+    warp0: 1200, focus: 'earth', camDist: 220, impactorTrails: 'helio',
     build(ctx) {
       const dir = ctx.dirFromAngles(35, 8);
       const { pos, vel } = ctx.approach(dir, 160, 0.0042, 4.0);  // dist Mm, speed Mm/s, impact param Mm (grazing)
@@ -100,7 +100,7 @@ export const SCENARIOS = [
   {
     id: 'jupiter', title: 'Jupiter, Head-On', skulls: 5,
     blurb: '318 Earth masses on a dead-center collision course at 35 km/s. There is no "impact" — Earth is simply swallowed. First the Moon spaghettifies at the Roche limit, then you become a brief bright smudge in a new storm band.',
-    warp0: 2500, focus: 'earth', camDist: 1600,
+    warp0: 2500, focus: 'earth', camDist: 1600, impactorTrails: 'helio',
     view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
       const dir = ctx.dirFromAngles(140, 12);
@@ -118,7 +118,7 @@ export const SCENARIOS = [
   {
     id: 'lance', title: 'The Lance — 0.4c', skulls: 5,
     blurb: 'A 500 km iron asteroid at four-tenths the speed of light. ~10³⁶ joules — sixteen thousand times Earth’s binding energy. You get about eight seconds to watch the glint grow. (γ=1.09: the relativity tax is small. The apocalypse is classical, and total.)',
-    warp0: 90, focus: 'earth', camDist: 140,
+    warp0: 90, focus: 'earth', camDist: 140, impactorTrails: 'helio',
     view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
       const dir = ctx.dirFromAngles(95, 22);
@@ -134,7 +134,7 @@ export const SCENARIOS = [
   {
     id: 'hitrun', title: 'Hit & Run', skulls: 5,
     blurb: 'A Mars-sized body at a steep grazing angle — rips a gouge through the mantle and keeps going, trailing both planets’ guts. A real planetary-science category.',
-    warp0: 1500, focus: 'earth', camDist: 240,
+    warp0: 1500, focus: 'earth', camDist: 240, impactorTrails: 'helio',
     build(ctx) {
       const dir = ctx.dirFromAngles(210, -6);
       const { pos, vel } = ctx.approach(dir, 180, 0.013, 7.6);   // graze at ~1.2 Earth radii
@@ -236,7 +236,7 @@ export const SCENARIOS = [
   {
     id: 'kidnap', title: 'Grand Theft Orbit', skulls: 5,
     blurb: 'A rogue Jupiter doesn’t hit us — it doesn’t have to. A close flyby at 150,000 km plays gravitational billiards with the whole Earth-Moon system. Watch the trails: nothing ends up where it started.',
-    warp0: 8000, focus: 'earth', camDist: 700,
+    warp0: 8000, focus: 'earth', camDist: 700, impactorTrails: 'helio',
     view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
       const dir = ctx.prograde();   // dead ahead on Earth's orbital path — we drive INTO it
@@ -275,7 +275,7 @@ export const SCENARIOS = [
   {
     id: 'marsattack', title: 'Mars Attacks', skulls: 5,
     blurb: 'The actual Mars, off-center at 15 km/s. The red planet becomes part of the blue one — gouging in sideways, with both planets’ mantles on display.',
-    warp0: 1500, focus: 'earth', camDist: 240,
+    warp0: 1500, focus: 'earth', camDist: 240, impactorTrails: 'helio',
     build(ctx) {
       const dir = ctx.dirFromAngles(150, -10);
       const { pos, vel } = ctx.approach(dir, 200, 0.015, 5);
@@ -290,7 +290,7 @@ export const SCENARIOS = [
   {
     id: 'venusfall', title: 'Venus Descending', skulls: 5,
     blurb: 'Earth’s evil twin arrives — 480°C surface, sulfur clouds, and 4.9×10²⁴ kg of bad intentions, swinging in off-axis.',
-    warp0: 1500, focus: 'earth', camDist: 260,
+    warp0: 1500, focus: 'earth', camDist: 260, impactorTrails: 'helio',
     build(ctx) {
       const dir = ctx.dirFromAngles(285, 8);
       const { pos, vel } = ctx.approach(dir, 220, 0.011, 3.5);
@@ -305,7 +305,7 @@ export const SCENARIOS = [
   {
     id: 'embrace', title: 'The Embrace', skulls: 5,
     blurb: 'A second Earth drifts in at walking-into-each-other speed. No fireball arrival — just two worlds slowly, irreversibly becoming one. Somehow worse.',
-    warp0: 3000, focus: 'earth', camDist: 320,
+    warp0: 3000, focus: 'earth', camDist: 320, impactorTrails: 'helio',
     build(ctx) {
       const dir = ctx.dirFromAngles(60, 14);
       const { pos, vel } = ctx.approach(dir, 240, 0.0028, 4);   // barely above mutual capture
@@ -321,7 +321,7 @@ export const SCENARIOS = [
   {
     id: 'pluto', title: "Pluto's Revenge", skulls: 5,
     blurb: 'Demoted in 2006. Radicalized ever since. 1.3×10²² kg of icy grudge at 22 km/s.',
-    warp0: 1800, focus: 'earth', camDist: 120,
+    warp0: 1800, focus: 'earth', camDist: 120, impactorTrails: 'helio',
     build(ctx) {
       const dir = ctx.dirFromAngles(310, 20);
       const { pos, vel } = ctx.approach(dir, 800, 0.022, 2);   // slightly off-center gouge
@@ -364,7 +364,7 @@ export const SCENARIOS = [
   {
     id: 'earth2', title: 'Mirror Earth', skulls: 5,
     blurb: 'An identical Earth, head-on, at escape velocity. The cleanest possible apocalypse — two worlds, one splash.',
-    warp0: 1500, focus: 'earth', camDist: 260,
+    warp0: 1500, focus: 'earth', camDist: 260, impactorTrails: 'helio',
     build(ctx) {
       const dir = ctx.dirFromAngles(0, 0);
       const { pos, vel } = ctx.approach(dir, 220, 0.0112, 2.5);
