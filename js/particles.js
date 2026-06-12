@@ -3,26 +3,28 @@ import { SIM_WGSL } from './shaders_sim.js';
 import { MAT_TYPES } from './bodies.js';
 import { G_SIM } from './orbits.js';
 
-export const MAXN = 65536;
+export const ABS_MAXN = 2097152;   // absolute ceiling (2M) — buffers allocate to the per-session
+                                   // cap below, so small machines never pay big-machine memory
 // drawn-sphere size vs physics radius: was 1.6-1.85, which visually swallowed ~2-radius
 // impact deformation — slimmer spheres let craters and dents actually show
 const VISR = { IRON: 1.35, ROCK: 1.45, CRUST: 1.45, WATER: 1.55, ICE: 1.45, GAS: 1.8, LAVA: 1.45, ARMED: 1.0 };
 
 export class ParticleSystem {
-  async init(gpu) {
+  async init(gpu, capN = 262144) {
+    this.maxN = Math.min(Math.max(capN, 16384), ABS_MAXN);
     this.gpu = gpu;
     const d = gpu.device;
     const B = GPUBufferUsage;
     this.pos = [
-      d.createBuffer({ size: MAXN * 16, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'posA' }),
-      d.createBuffer({ size: MAXN * 16, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'posB' }),
+      d.createBuffer({ size: this.maxN * 16, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'posA' }),
+      d.createBuffer({ size: this.maxN * 16, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'posB' }),
     ];
     this.vel = [
-      d.createBuffer({ size: MAXN * 16, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'velA' }),
-      d.createBuffer({ size: MAXN * 16, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'velB' }),
+      d.createBuffer({ size: this.maxN * 16, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'velA' }),
+      d.createBuffer({ size: this.maxN * 16, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'velB' }),
     ];
-    this.metaBuf = d.createBuffer({ size: MAXN * 4, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'meta' });
-    this.albedoBuf = d.createBuffer({ size: MAXN * 4, usage: B.STORAGE | B.COPY_DST, label: 'albedo' });
+    this.metaBuf = d.createBuffer({ size: this.maxN * 4, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC, label: 'meta' });
+    this.albedoBuf = d.createBuffer({ size: this.maxN * 4, usage: B.STORAGE | B.COPY_DST, label: 'albedo' });
     this.matsBuf = d.createBuffer({ size: 16 * 64, usage: B.STORAGE | B.COPY_DST, label: 'mats' });
     this.paramsBuf = d.createBuffer({ size: 80, usage: B.UNIFORM | B.COPY_DST, label: 'simParams' });
     this.shiftBuf = d.createBuffer({ size: 32, usage: B.UNIFORM | B.COPY_DST, label: 'shift' });
@@ -73,7 +75,7 @@ export class ParticleSystem {
     }));
 
     this.staging = [0, 1].map(() => ({
-      buf: d.createBuffer({ size: MAXN * 36 + 128, usage: B.COPY_DST | B.MAP_READ, label: 'staging' }),
+      buf: d.createBuffer({ size: this.maxN * 36 + 128, usage: B.COPY_DST | B.MAP_READ, label: 'staging' }),
       pending: false,
     }));
 
@@ -107,7 +109,7 @@ export class ParticleSystem {
   // Add a blob built by blob.js at local position/velocity (Mm, Mm/s)
   addBlob(blob, posL, velL, name) {
     const N = blob.count;
-    if (this.activeN + N > MAXN) throw new Error('particle budget exceeded');
+    if (this.activeN + N > this.maxN) throw new Error('particle budget exceeded');
     const bodySlot = this.bodies.length;
     if (bodySlot >= 16) throw new Error('out of body slots');
 
@@ -173,7 +175,7 @@ export class ParticleSystem {
 
   // Sub-resolution impactor: one particle carrying its real kinetic energy as a payload
   addArmedImpactor(massSim, energySim, posL, velL, visRad, name) {
-    if (this.activeN + 1 > MAXN) throw new Error('particle budget exceeded');
+    if (this.activeN + 1 > this.maxN) throw new Error('particle budget exceeded');
     const bodySlot = this.bodies.length;
     const slot = this._allocMatSlot(
       { type: 'ARMED', cp: 1000, T0: 300, isSurface: false, bodySlot, rad: visRad, k: 1e-12 },
@@ -285,9 +287,9 @@ export class ParticleSystem {
     if (!st) return;
     const n = this.activeN;
     encoder.copyBufferToBuffer(this.pos[this.ping], 0, st.buf, 0, n * 16);
-    encoder.copyBufferToBuffer(this.vel[this.ping], 0, st.buf, MAXN * 16, n * 16);
-    encoder.copyBufferToBuffer(this.metaBuf, 0, st.buf, MAXN * 32, n * 4);
-    encoder.copyBufferToBuffer(this.dbgBuf, 0, st.buf, MAXN * 36, 128);
+    encoder.copyBufferToBuffer(this.vel[this.ping], 0, st.buf, this.maxN * 16, n * 16);
+    encoder.copyBufferToBuffer(this.metaBuf, 0, st.buf, this.maxN * 32, n * 4);
+    encoder.copyBufferToBuffer(this.dbgBuf, 0, st.buf, this.maxN * 36, 128);
     st.pending = true;
     st.epoch = this.epoch;
     st.n = n;
@@ -312,9 +314,9 @@ export class ParticleSystem {
         let stats = null;
         if (st.epoch === this.epoch) {
           const ab = st.buf.getMappedRange();
-          stats = this._computeStats(new Float32Array(ab, 0, st.n * 4), new Float32Array(ab, MAXN * 16, st.n * 4), new Uint32Array(ab, MAXN * 32, st.n));
+          stats = this._computeStats(new Float32Array(ab, 0, st.n * 4), new Float32Array(ab, this.maxN * 16, st.n * 4), new Uint32Array(ab, this.maxN * 32, st.n));
           stats.simTimeTag = st.simTimeTag;
-          stats.dbg = Array.from(new Float32Array(ab, MAXN * 36, 32));
+          stats.dbg = Array.from(new Float32Array(ab, this.maxN * 36, 32));
           stats.dbgIdx = this.debugIdx;
         }
         st.buf.unmap();

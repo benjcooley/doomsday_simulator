@@ -22,34 +22,50 @@ function fatal(msg, detail) {
     (detail ? `<div class="boot-sub" style="color:#7d8b9e;max-width:520px;text-align:center;font-size:11px;line-height:1.6;margin-top:4px">${detail}</div>` : '');
 }
 
-// Benchmark the real physics kernel to pick a sensible default density (and flag weak GPUs).
-// Cost of the fused O(N²) pass scales as N², so one timing fixes the whole curve.
-async function profileGPU(gpu, ps) {
-  const N = 8192;
-  try {
-    const { buildBlob } = await import('./blob.js');
+// Benchmark the REAL physics step (whichever engine is active) to pick the default density.
+// N² engine: cost ∝ N², one timing fixes the curve. FAST engine: cost ≈ c0 + b·N, so we
+// measure at two sizes and fit the line — its ceiling is far higher.
+async function profileGPU(gpu, ps, isFast) {
+  const { buildBlob } = await import('./blob.js');
+  const measure = async (N) => {
     ps.reset();
     ps.addBlob(buildBlob('rock', 6.0, 5.0, N, {}), [0, 0, 0], [0, 0, 0], 'probe');
     ps.writeParams({ dt: 1, settleBoost: 1, sunPos: [1e7, 0, 0], gmSun: 0, coolMul: 0,
       heatMul: 0, time: 0, solarLum: 1, heatGate: 0, settleDrag: 0 });
     const burst = () => { const e = gpu.device.createCommandEncoder(); ps.step(e, 1); gpu.device.queue.submit([e.finish()]); };
-    for (let w = 0; w < 3; w++) burst();             // warm up shader/caches
+    for (let w = 0; w < 3; w++) burst();
     await gpu.device.queue.onSubmittedWorkDone();
     const K = 12, t0 = performance.now();
     for (let i = 0; i < K; i++) burst();
     await gpu.device.queue.onSubmittedWorkDone();
-    const perStep = (performance.now() - t0) / K;     // ms for one substep at N
+    return (performance.now() - t0) / K;
+  };
+  const LIVE_SUB = 4, budgetMs = 6.5;
+  try {
+    if (isFast) {
+      const t8 = await measure(8192);
+      const t32 = await measure(32768);
+      ps.reset();
+      const b = Math.max((t32 - t8) / (32768 - 8192), 1e-7);   // ms per particle
+      const c0 = Math.max(t8 - b * 8192, 0);                    // fixed per-substep cost
+      const ideal = (budgetMs / LIVE_SUB - c0) / b;
+      let suggested = 16384;
+      for (const t of [16384, 32768, 65536, 131072, 262144, 524288]) if (t <= ideal) suggested = t;
+      const tooWeak = (c0 + b * 16384) * LIVE_SUB > 26;
+      return { engine: 'fast', t8: +t8.toFixed(2), t32: +t32.toFixed(2), ideal: Math.round(ideal), suggested, tooWeak, perStep: +t8.toFixed(2), N: 8192 };
+    }
+    const N = 8192;
+    const perStep = await measure(N);
     ps.reset();
-    const c = perStep / (N * N);                      // ms per N²
-    const LIVE_SUB = 4, budgetMs = 6.5;               // 4 substeps/frame must fit the budget
+    const c = perStep / (N * N);
     const ideal = Math.sqrt(budgetMs / (LIVE_SUB * c));
     let suggested = 8192;
     for (const t of [8192, 16384, 32768, 42000]) if (t <= ideal) suggested = t;
     const tooWeak = (LIVE_SUB * c * 7000 * 7000 > 18) || perStep > 60;
-    return { N, perStep: +perStep.toFixed(2), ideal: Math.round(ideal), suggested, tooWeak };
+    return { engine: 'n2', N, perStep: +perStep.toFixed(2), ideal: Math.round(ideal), suggested, tooWeak };
   } catch (e) {
     ps.reset();
-    return { N, perStep: 0, ideal: 0, suggested: 16384, tooWeak: false, note: 'probe-failed:' + e.message };
+    return { engine: isFast ? 'fast' : 'n2', perStep: 0, ideal: 0, suggested: 16384, tooWeak: false, note: 'probe-failed:' + e.message };
   }
 }
 
@@ -67,8 +83,9 @@ async function start() {
       return;
     }
     const url = new URL(location.href);
-    const qTiers = { low: 8192, med: 16384, high: 32768, ultra: 42000 };
-    const qOverride = qTiers[url.searchParams.get('q')] || null;
+    const qTiers = { low: 8192, med: 16384, high: 32768, ultra: 65536, mega: 131072, insane: 262144, ludicrous: 524288 };
+    const qRaw = url.searchParams.get('q');
+    const qOverride = qTiers[qRaw] || (Math.min(524288, Math.max(4096, parseInt(qRaw) || 0)) || null);
 
     bootMsg('acquiring GPU…');
     let gpu;
@@ -106,14 +123,16 @@ async function start() {
     }
 
     bootMsg('compiling physics kernels…');
-    // ?kernel=fast selects the O(N·k) grid engine (validated in test/ stages 0-7);
-    // the proven N² engine remains the default — the deployed site cannot regress.
-    const useFast = url.searchParams.get('kernel') === 'fast';
-    const ps = await new (useFast ? FastParticleSystem : ParticleSystem)().init(gpu);
-    console.log(`physics engine: ${useFast ? 'FAST (grid+monopole)' : 'N² (proven)'}`);
+    // The FAST grid engine (validated in test/ stages 0-8 + in-browser A/B) is the DEFAULT.
+    // ?kernel=n2 selects the original O(N²) engine as a reference/escape hatch.
+    const useFast = url.searchParams.get('kernel') !== 'n2';
+    // buffers allocate to this cap — big requests get headroom, small machines stay lean
+    const capN = Math.max(262144, Math.ceil((qOverride || 0) * 1.7));
+    const ps = await new (useFast ? FastParticleSystem : ParticleSystem)().init(gpu, capN);
+    console.log(`physics engine: ${useFast ? 'FAST (grid+monopole, default)' : 'N² (reference)'}`);
 
     bootMsg('profiling GPU…');
-    const prof = await profileGPU(gpu, ps);
+    const prof = await profileGPU(gpu, ps, useFast);
     console.log('GPU profile', JSON.stringify(prof));
     if (prof.tooWeak && !qOverride) {
       fatal('This GPU is too weak for the collision physics.',

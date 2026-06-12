@@ -307,7 +307,7 @@ export class Sim {
     return best;
   }
 
-  qualityMax() { return Math.min(65536, Math.round(this.quality * 1.55)); }
+  qualityMax() { return Math.min(this.ps.maxN || 65536, Math.round(this.quality * 1.55)); }
 
   moltenDelta(slot) {
     if (!this.statsCache || !this.statsBase) return 0;

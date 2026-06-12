@@ -236,18 +236,36 @@ export class UI {
     mkVS('Heat drama', 'heatMul', 0.2, 4, 0.1);
     mkVS('Cooling rate', 'coolMul', 0, 20000, 100);
     mkVS('Star brightness', 'starBoost', 0, 1.5, 0.05);
-    // particle-density dial: continuous count, applied on release (changing it rebuilds bodies)
+    // particle-density dial: log-scale count, applied on release (changing it rebuilds bodies).
+    // Fast engine scales to 1M; the reference N² engine is capped where it stays interactive.
     const qRow = this._el('div', 'srow', vw);
     this._el('span', 'slabel', qRow, 'DENSITY');
     const qOut = this._el('span', 'sval', qRow, '');
     this.qDial = this._el('input', 'slider', qRow);
-    this.qDial.type = 'range'; this.qDial.min = 4000; this.qDial.max = 58000; this.qDial.step = 1000;
-    this.qDial.value = this.sim.quality;
-    this.qDial.title = 'Particle count — higher = finer detail, slower. Rebuilds on release.';
+    const isFast = !!this.sim.ps.isFast;
+    const Q_MIN = 4000, Q_MAX = isFast ? 1048576 : 42000;
+    this.qDial.type = 'range'; this.qDial.min = 0; this.qDial.max = 1000; this.qDial.step = 1;
+    const qFromDial = (v) => Math.round(Math.exp(Math.log(Q_MIN) + (Math.log(Q_MAX) - Math.log(Q_MIN)) * (v / 1000)) / 1000) * 1000;
+    const dialFromQ = (q) => Math.round(1000 * (Math.log(Math.max(Q_MIN, Math.min(Q_MAX, q))) - Math.log(Q_MIN)) / (Math.log(Q_MAX) - Math.log(Q_MIN)));
+    this.qDial.value = dialFromQ(this.sim.quality);
+    this.qDial.title = isFast
+      ? 'Particle count (log scale, up to 1M) — higher = finer detail, slower. Rebuilds on release.'
+      : 'Particle count — the N² reference engine caps at 42k. Remove ?kernel=n2 for up to 1M.';
     const fmtQ = (n) => (n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : n);
     qOut.textContent = fmtQ(this.sim.quality);
-    this.qDial.addEventListener('input', () => { qOut.textContent = fmtQ(parseInt(this.qDial.value)); });
-    this.qDial.addEventListener('change', () => this.cb.setQuality(parseInt(this.qDial.value)));
+    this.qDial.addEventListener('input', () => { qOut.textContent = fmtQ(qFromDial(parseInt(this.qDial.value))); });
+    this.qDial.addEventListener('change', () => {
+      const n = qFromDial(parseInt(this.qDial.value));
+      if (Math.round(n * 1.6) > (this.sim.ps.maxN || 65536)) {
+        // beyond this session's buffer allocation — relaunch with the bigger cap
+        const u = new URL(location.href);
+        u.searchParams.set('q', n);
+        u.searchParams.set('scenario', this.sim.scenarioId);
+        location.href = u.toString();
+        return;
+      }
+      this.cb.setQuality(n);
+    });
 
     // ---- HUD ----
     const hud = this._el('div', 'hud');

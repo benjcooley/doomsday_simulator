@@ -5,15 +5,15 @@
 // Validated headlessly in test/ stages 0-7 (bit-exact passes, force parity 7e-6,
 // 1000-step dynamic parity, 8-16× speedup). Selected via ?kernel=fast — the proven
 // N² engine stays the default.
-import { ParticleSystem, MAXN } from './particles.js';
+import { ParticleSystem } from './particles.js';
 import { GRID_WGSL, SCAN_WGSL, SCATTER_WGSL, GRAV_DEPOSIT_WGSL, fastForceWGSL, HASH_SIZE } from './shaders_sim_fast.js';
 
 const fr = Math.fround;
 const GRAV_CELLS = 4096;
 
 export class FastParticleSystem extends ParticleSystem {
-  async init(gpu) {
-    await super.init(gpu);
+  async init(gpu, capN) {
+    await super.init(gpu, capN);
     this.isFast = true;
     const d = gpu.device;
     const B = GPUBufferUsage;
@@ -24,12 +24,12 @@ export class FastParticleSystem extends ParticleSystem {
     this.bodyDynBufU = d.createBuffer({ size: 16 * 48, usage: B.UNIFORM | B.COPY_DST, label: 'bodyDynU' });
 
     // grid + gravity buffers
-    this.cellOfBuf = d.createBuffer({ size: MAXN * 4, usage: B.STORAGE, label: 'cellOf' });
+    this.cellOfBuf = d.createBuffer({ size: this.maxN * 4, usage: B.STORAGE, label: 'cellOf' });
     this.countsBuf = d.createBuffer({ size: HASH_SIZE * 4, usage: B.STORAGE | B.COPY_SRC, label: 'counts' });
     this.offsetsBuf = d.createBuffer({ size: HASH_SIZE * 4, usage: B.STORAGE | B.COPY_SRC, label: 'offsets' });
     this.cursorBuf = d.createBuffer({ size: HASH_SIZE * 4, usage: B.STORAGE | B.COPY_DST, label: 'cursor' });
     this.blockSumsBuf = d.createBuffer({ size: (HASH_SIZE / 256) * 4, usage: B.STORAGE, label: 'blockSums' });
-    this.sortedBuf = d.createBuffer({ size: MAXN * 4, usage: B.STORAGE, label: 'sorted' });
+    this.sortedBuf = d.createBuffer({ size: this.maxN * 4, usage: B.STORAGE, label: 'sorted' });
     this.gravBuf = d.createBuffer({ size: GRAV_CELLS * 16, usage: B.STORAGE, label: 'gravCells' });
     this.gpGridBuf = d.createBuffer({ size: 16, usage: B.UNIFORM | B.COPY_DST, label: 'gpGrid' });
     this.spScanBuf = d.createBuffer({ size: 16, usage: B.UNIFORM | B.COPY_DST, label: 'spScan' });

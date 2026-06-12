@@ -4,7 +4,7 @@
 // (imported from shaders_sim.js) — this file only adds the neighbor-finding machinery.
 import { SIM_STRUCTS_WGSL, SIM_HELPERS_WGSL, SELF_DECLS_WGSL, SELF_MATS_WGSL, pairPhysicsWGSL, integrateTailWGSL } from './shaders_sim.js';
 
-export const HASH_SIZE = 1 << 17;   // 131072 hash cells (open hash over unbounded space)
+export const HASH_SIZE = 1 << 20;   // 1M hash cells — load factor stays sane at 500k particles
 
 // hash math — MUST stay identical to jsCellHash below (validated bit-exact in stage 1)
 const HASH_FNS = /* wgsl */`
