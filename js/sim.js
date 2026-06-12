@@ -141,17 +141,18 @@ export class Sim {
       // them in the Earth-co-moving local frame made every trail a position-relative-to-
       // Earth's-frame-at-record-time: at high warp the seeded year-ellipse rode rigidly
       // around the Sun with Earth — the "solar system orbits Earth" illusion.
-      const M = arc.M, eArc = this.origArcs.find((a) => a.kind === 'earth');
+      const M = arc.M;
       const seed = [];
       for (let k = 1; k < M; k++) {     // chronological past, oldest first, ending at "now"
         const px = arc.pts[k * 3], py = arc.pts[k * 3 + 1], pz = arc.pts[k * 3 + 2];
         if (arc.frame === 'helio') seed.push([px, py, pz]);
         else {
-          // geocentric moon point recorded τ ago → add Earth's helio position THEN, read
-          // off the earth arc (a full forward period ≡ the past, by periodicity)
+          // geocentric moon point recorded τ ago → add Earth's helio position AT THAT MOMENT
+          // (analytic ephemeris — per-point, smooth). Snapping to coarse arc samples here
+          // produced staircases of pure geocentric loop: "the Moon's trail orbits Earth".
           const tau = (M - k) * arc.dt;
-          const j = ((eArc.M - Math.round(tau / eArc.dt)) % eArc.M + eArc.M) % eArc.M;
-          seed.push([px + eArc.pts[j * 3], py + eArc.pts[j * 3 + 1], pz + eArc.pts[j * 3 + 2]]);
+          const ep = planetPos('earth', this.jd0 - tau / 86400);
+          seed.push([px + ep[0], py + ep[1], pz + ep[2]]);
         }
       }
       let circ = 0;
