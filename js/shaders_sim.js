@@ -466,14 +466,26 @@ fn thermal(@builtin(global_invocation_id) gid: vec3u) {
   velTh[i] = vec4f(velTh[i].xyz, T);
 }
 
-// --- frame rebase / rigid body shift ---
-// slot == 0xffffffff: shift ALL particles by -dp/-dv (frame rebase).
-// otherwise: shift only particles of that body slot by +dp/+dv (rigid ride-along while frozen).
-struct Shift { dp: vec3f, n: u32, dv: vec3f, slot: u32 }
+// --- frame rebase / rigid body shift (with rigid ROTATION for frozen ride-along) ---
+// slot == 0xffffffff: shift ALL particles by -dp/-dv (frame rebase, no rotation).
+// otherwise: particles of that body slot rotate by rotAA (axis, angle) about com, then
+// translate by +dp/+dv. Rotation keeps planets spinning while mechanics are frozen —
+// positions orbit the spin axis and the spin-component of velocity rotates with them.
+struct Shift {
+  dp: vec3f, n: u32,
+  dv: vec3f, slot: u32,
+  rotAA: vec4f,    // xyz = unit axis, w = angle (radians); w == 0 → no rotation
+  com: vec4f,      // rotation centre (body CoM)
+  vcom: vec4f,     // body bulk velocity — only the spin part of velocity rotates
+}
 @group(0) @binding(0) var<uniform> S: Shift;
 @group(0) @binding(1) var<storage, read_write> posR: array<vec4f>;
 @group(0) @binding(2) var<storage, read_write> velR: array<vec4f>;
 @group(0) @binding(3) var<storage, read> metaR: array<u32>;
+
+fn rodrigues(v: vec3f, k: vec3f, c: f32, s: f32) -> vec3f {
+  return v * c + cross(k, v) * s + k * (dot(k, v) * (1.0 - c));
+}
 
 @compute @workgroup_size(256)
 fn rebase(@builtin(global_invocation_id) gid: vec3u) {
@@ -487,9 +499,17 @@ fn rebase(@builtin(global_invocation_id) gid: vec3u) {
   } else {
     if (((metaR[i] >> 4u) & 15u) == S.slot) {
       let pm = posR[i];
-      posR[i] = vec4f(pm.xyz + S.dp, pm.w);
       let vt = velR[i];
-      velR[i] = vec4f(vt.xyz + S.dv, vt.w);
+      var p = pm.xyz;
+      var v = vt.xyz;
+      if (S.rotAA.w != 0.0) {
+        let c = cos(S.rotAA.w);
+        let sn = sin(S.rotAA.w);
+        p = S.com.xyz + rodrigues(p - S.com.xyz, S.rotAA.xyz, c, sn);
+        v = S.vcom.xyz + rodrigues(v - S.vcom.xyz, S.rotAA.xyz, c, sn);
+      }
+      posR[i] = vec4f(p + S.dp, pm.w);
+      velR[i] = vec4f(v + S.dv, vt.w);
     }
   }
 }

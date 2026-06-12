@@ -341,7 +341,7 @@ async function start() {
         // compute pass
         const enc = gpu.device.createCommandEncoder();
         if (plan.rebase) ps.rebase(enc, plan.rebase.dp, plan.rebase.dv);
-        for (const s of plan.shifts) ps.rebase(enc, s.dp, s.dv, s.slot);
+        for (const s of plan.shifts) ps.rebase(enc, s.dp, s.dv, s.slot, s.rot);
         if (plan.substeps > 0) ps.step(enc, plan.substeps);
         if (plan.thermal) ps.thermalStep(enc);
         if (plan.readback) ps.requestReadback(enc, sim.simTime);

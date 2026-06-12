@@ -85,7 +85,7 @@ export class Renderer {
     // line vertex buffers
     this.orbitVB = d.createBuffer({ size: 600000, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: 'orbits' });
     this.orbitRanges = [];
-    this.trailVB = d.createBuffer({ size: 16 * 320 * 16, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: 'trails' });
+    this.trailVB = d.createBuffer({ size: 16 * 560 * 16, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: 'trails' });
     this.trailRanges = [];
     this.ghostVB = d.createBuffer({ size: 16 * 256 * 16, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: 'ghosts' });
     this.ghostRanges = [];
@@ -216,8 +216,8 @@ export class Renderer {
   }
 
   writeTrail(slotIdx, f32rgba, count) {
-    this.gpu.device.queue.writeBuffer(this.trailVB, slotIdx * 320 * 16, f32rgba, 0, count * 4);
-    this.trailRanges[slotIdx] = { start: slotIdx * 320, count };
+    this.gpu.device.queue.writeBuffer(this.trailVB, slotIdx * 560 * 16, f32rgba, 0, count * 4);
+    this.trailRanges[slotIdx] = { start: slotIdx * 560, count };
   }
   clearTrails() { this.trailRanges = []; }
 

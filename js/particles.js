@@ -27,7 +27,7 @@ export class ParticleSystem {
     this.albedoBuf = d.createBuffer({ size: this.maxN * 4, usage: B.STORAGE | B.COPY_DST, label: 'albedo' });
     this.matsBuf = d.createBuffer({ size: 16 * 64, usage: B.STORAGE | B.COPY_DST, label: 'mats' });
     this.paramsBuf = d.createBuffer({ size: 80, usage: B.UNIFORM | B.COPY_DST, label: 'simParams' });
-    this.shiftBuf = d.createBuffer({ size: 32, usage: B.UNIFORM | B.COPY_DST, label: 'shift' });
+    this.shiftBuf = d.createBuffer({ size: 80, usage: B.UNIFORM | B.COPY_DST, label: 'shift' });
     this.bodyDynBuf = d.createBuffer({ size: 16 * 48, usage: B.STORAGE | B.COPY_DST, label: 'bodyDyn' });
     this.bodyDynArr = new Float32Array(16 * 12);
     this.dbgBuf = d.createBuffer({ size: 128, usage: B.STORAGE | B.COPY_SRC | B.COPY_DST, label: 'dbg' });
@@ -250,16 +250,23 @@ export class ParticleSystem {
     cp.end();
   }
 
-  rebase(encoder, dp, dv, slot) {
+  // rot (optional): { axis:[unit xyz], angle:rad, com:[xyz], vcom:[xyz] } — rigid spin applied
+  // while a body rides frozen, so planets keep rotating during cruise/aftermath sleep
+  rebase(encoder, dp, dv, slot, rot) {
     if (this.activeN === 0) return;
-    const a = new ArrayBuffer(32);
+    const a = new ArrayBuffer(80);
     const f = new Float32Array(a), u = new Uint32Array(a);
     f[0] = dp[0]; f[1] = dp[1]; f[2] = dp[2]; u[3] = this.activeN;
     f[4] = dv[0]; f[5] = dv[1]; f[6] = dv[2]; u[7] = slot === undefined ? 0xffffffff : slot;
+    if (rot && rot.angle) {
+      f[8] = rot.axis[0]; f[9] = rot.axis[1]; f[10] = rot.axis[2]; f[11] = rot.angle;
+      f[12] = rot.com[0]; f[13] = rot.com[1]; f[14] = rot.com[2];
+      f[16] = rot.vcom[0]; f[17] = rot.vcom[1]; f[18] = rot.vcom[2];
+    }
     if (!this._shiftPool) this._shiftPool = [];
     if (this._shiftFrame !== this.gpu.frameId) { this._shiftFrame = this.gpu.frameId; this._shiftUsed = 0; }
     if (this._shiftUsed >= this._shiftPool.length) {
-      const buf = this.gpu.device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const buf = this.gpu.device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const bgs = [0, 1].map((ping) => this.gpu.device.createBindGroup({
         layout: this.rebasePipe.getBindGroupLayout(0),
         entries: [
@@ -373,6 +380,11 @@ export class ParticleSystem {
       const wx = vt[i * 4] - b.cov[0], wy = vt[i * 4 + 1] - b.cov[1], wz = vt[i * 4 + 2] - b.cov[2];
       const w2 = wx * wx + wy * wy + wz * wz;
       b.rms2 = (b.rms2 || 0) + m * w2;
+      // angular momentum + moment of inertia → ω estimate (drives frozen rigid rotation)
+      b.Lx = (b.Lx || 0) + m * (dy * wz - dz * wy);
+      b.Ly = (b.Ly || 0) + m * (dz * wx - dx * wz);
+      b.Lz = (b.Lz || 0) + m * (dx * wy - dy * wx);
+      b.Iw = (b.Iw || 0) + m * (dx * dx + dy * dy + dz * dz);
       if (w2 > (b.maxV2 || 0)) b.maxV2 = w2;
       if (w2 > 2.5e-7) b.fastN = (b.fastN || 0) + 1;     // > 0.5 km/s internal
       if (me[i] & 2048) b.nanN = (b.nanN || 0) + 1;      // NaN guard ever fired
@@ -407,6 +419,7 @@ export class ParticleSystem {
       b.moltenFrac = b.count > 0 ? b.molten / b.count : 0;
       b.rmsV = b.mass > 0 ? Math.sqrt((b.rms2 || 0) / b.mass) * 1000 : 0;   // km/s internal motion
       b.maxV = Math.sqrt(b.maxV2 || 0) * 1000;
+      b.omega = (b.Iw || 0) > 1e-12 ? [b.Lx / b.Iw, b.Ly / b.Iw, b.Lz / b.Iw] : [0, 0, 0];
       b.fastN = b.fastN || 0;
       b.nanN = b.nanN || 0;
     }

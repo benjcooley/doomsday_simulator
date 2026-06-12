@@ -128,6 +128,31 @@ export class Sim {
     // capture each body's original orbit (fixed reference paths — deviation is drawn against these)
     this._captureOriginalOrbits();
 
+    // SEED each mirror body's motion trail with its original orbit: the orbit IS the trail's
+    // starting history, and live movement appends to it — so the body's real path draws
+    // continuously out of its predicted ellipse, and any deviation peels away visibly.
+    for (const b of this.mirror) {
+      let arc = null;
+      if (b.slot === 0) arc = this.origArcs.find((a) => a.kind === 'earth');
+      else if (b.canonical) arc = this.origArcs.find((a) => a.kind === 'moon' && a.slot === b.slot);
+      if (!arc) continue;
+      const M = arc.M;
+      const seed = [];
+      let circ = 0;
+      for (let k = 1; k < M; k++) {     // chronological past, oldest first, ending at "now"
+        const px = arc.pts[k * 3], py = arc.pts[k * 3 + 1], pz = arc.pts[k * 3 + 2];
+        // earth arc is heliocentric (→ local = pt − anchor); moon arc is geocentric about
+        // Earth, whose local position at load is the origin (→ local = pt)
+        seed.push(arc.frame === 'helio'
+          ? [px - this.anchor.pos[0], py - this.anchor.pos[1], pz - this.anchor.pos[2]]
+          : [px, py, pz]);
+        if (k > 1) circ += Math.hypot(px - arc.pts[(k - 1) * 3], py - arc.pts[(k - 1) * 3 + 1], pz - arc.pts[(k - 1) * 3 + 2]);
+      }
+      b.trail = seed;
+      b.trailStep = Math.max(b.R * 0.5, circ / M * 0.7);   // live appends continue arc density
+      b.dirty = true;
+    }
+
     this.focusId = def.focus || 'earth';
     this.camHint = { dist: def.camDist || 40 };
     this.statusText = 'SIMULATION READY';
@@ -573,8 +598,19 @@ export class Sim {
       // and readbacks keep temps/population/livable-land flowing.
       for (const b of this.mirror) {
         const dp = vsub(b.pos, b.freezePos);
-        if (vdot(dp, dp) > 1e-10) {
-          out.shifts.push({ slot: b.slot, dp, dv: [0, 0, 0] });
+        // rigid SPIN while frozen: pristine bodies use their known spin (Earth's sidereal
+        // rate), disturbed remnants use the ω estimated from angular momentum in the stats —
+        // planets keep visibly rotating through cruise and aftermath sleep.
+        const w = (b.omegaEst && vlen(b.omegaEst) > 1e-9) ? b.omegaEst : (b.spin || null);
+        let rot = null;
+        if (w) {
+          const mag = vlen(w);
+          if (mag * simDt > 1e-7) {
+            rot = { axis: vscale(w, 1 / mag), angle: mag * simDt, com: b.freezePos, vcom: b.freezeVel };
+          }
+        }
+        if (vdot(dp, dp) > 1e-10 || rot) {
+          out.shifts.push({ slot: b.slot, dp, dv: [0, 0, 0], rot });
           b.freezePos = b.pos.slice();
         }
       }
@@ -641,10 +677,10 @@ export class Sim {
         continue;
       }
       const last = b.trail.length ? b.trail[b.trail.length - 1] : null;
-      const step = Math.max(1.5, b.R * 0.5);
+      const step = b.trailStep || Math.max(1.5, b.R * 0.5);
       if (!last || vlen(vsub(b.pos, last)) > step) {
         b.trail.push(b.pos.slice());
-        if (b.trail.length > 300) b.trail.shift();
+        if (b.trail.length > 500) b.trail.shift();
         b.dirty = true;
       }
     }
@@ -719,6 +755,11 @@ export class Sim {
         const sb = stats.bodies[b.slot];
         if (sb && sb.count > 2) { b.pos = sb.com.slice(); b.vel = sb.cov.slice(); }
       }
+    }
+    // measured spin (L/I) — drives rigid rotation during frozen cruise/aftermath sleep
+    for (const b of this.mirror) {
+      const sb = stats.bodies[b.slot];
+      if (sb && sb.count > 8 && sb.omega) b.omegaEst = sb.omega.slice();
     }
     // merge swallowed bodies into Earth: a CoM deep inside the planet means accretion is
     // done — keeping it as a separate "body" poisons the calm detector and threat logic
@@ -887,6 +928,7 @@ export class Sim {
     let gi = 0;
     for (const arc of this.origArcs) {
       if (gi >= 15) break;
+      if (arc.kind !== 'planet') continue;   // mirror bodies carry their orbit as their TRAIL now
       let curHelio;   // body's ACTUAL heliocentric centre now
       if (arc.kind === 'earth') curHelio = eHelio;
       else if (arc.kind === 'planet') curHelio = planetPos(arc.name, jd);
