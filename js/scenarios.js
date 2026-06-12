@@ -147,24 +147,50 @@ export const SCENARIOS = [
     ],
   },
   {
-    id: 'billiards', title: 'Moon Billiards', skulls: 5,
-    blurb: 'Ceres slams the Moon at 80 km/s — hard enough to knock it out of orbit and onto US. The cosmic trick shot. Called pocket: Earth.',
-    warp0: 2000, focus: 'moon', camDist: 60,
+    id: 'spiral', title: 'Death Spiral', skulls: 5,
+    blurb: 'The Moon loses 72% of its orbital speed and drops into a plunging ellipse. Five days later it swings through the Roche limit at three Earth-radii — and the tides take it apart on live television.',
+    warp0: 50000, focus: 'body:Moon', camDist: 70, moon: { velScale: 0.28 },
+    headlines: [
+      { t: 2, text: 'Moon braking inexplicably. Orbit now "more of a dive"' },
+      { t: 86400, text: 'Perigee forecast revised from 363,000 km to 16,000 km' },
+      { cond: 'approach', text: 'Moon entering the Roche limit. It is visibly the wrong shape.' },
+      { cond: 'contact', text: 'LUNAR DEBRIS STREAM INBOUND — the sky now has texture' },
+      { cond: 'after:43200', text: 'Earth growing a ring made of ex-Moon. Honeymoon industry pivots.' },
+    ],
+  },
+  {
+    id: 'wrongway', title: 'Oncoming Traffic', skulls: 5,
+    blurb: 'A 300 km iron asteroid in a retrograde orbit — our lane, opposite direction. Head-on closing speed: 72 km/s, the fastest hit nature can deliver. No relativity required; the solar system just drives on both sides of the road.',
+    warp0: 600, focus: 'earth', camDist: 140,
+    view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
-      // hit the Moon's leading face to cancel its orbital velocity → it falls
-      const moonNow = ctx.predict('Moon', 0);
-      const moonSoon = ctx.predict('Moon', 1400);
-      const lead = [moonSoon[0] - moonNow[0], moonSoon[1] - moonNow[1], moonSoon[2] - moonNow[2]];
-      const ll = Math.hypot(...lead) || 1;
-      const ahead = lead.map((x) => x / ll);
-      const pos = [moonSoon[0] + ahead[0] * 110, moonSoon[1] + ahead[1] * 110, moonSoon[2] + ahead[2] * 110];
-      const vel = ahead.map((x) => -x * 0.080);
-      ctx.spawnImpactor({ recipe: 'rock', d_km: 940, pos, vel, name: 'Ceres (cue ball)' });
+      const dir = ctx.dirFromAngles(265, -4);
+      const { pos, vel } = ctx.approach(dir, 900, 0.072, 0);
+      ctx.spawnImpactor({ recipe: 'iron', d_km: 300, pos, vel, name: 'Wrong-Way Driver', countScale: 8 });
     },
     headlines: [
-      { t: 2, text: 'Ceres lines up the shot…' },
-      { cond: 'contact', text: 'CLACK. Moon in motion. Trajectory: us.' },
-      { cond: 'after:43200', text: 'The Moon would like everyone to know this wasn’t its idea' },
+      { t: 2, text: 'Object detected in retrograde orbit. It has the right of way, apparently.' },
+      { cond: 'approach', text: '72 km/s closing speed. Headlights useless.' },
+      { cond: 'contact', text: 'HEAD-ON COLLISION — crust totaled, no exchange of insurance' },
+      { cond: 'after:5400', text: 'Mantle declared open to the public' },
+    ],
+  },
+  {
+    id: 'kidnap', title: 'Grand Theft Orbit', skulls: 5,
+    blurb: 'A rogue Jupiter doesn’t hit us — it doesn’t have to. A close flyby at 150,000 km plays gravitational billiards with the whole Earth-Moon system. Watch the trails: nothing ends up where it started.',
+    warp0: 8000, focus: 'earth', camDist: 700,
+    view: { orbits: true, belt: false, trails: true, autoFrame: true },
+    build(ctx) {
+      const dir = ctx.dirFromAngles(200, 16);
+      // big impact parameter: this one is a MISS by design — the damage is gravitational
+      const { pos, vel } = ctx.approach(dir, 1600, 0.022, 150);
+      ctx.spawnImpactor({ recipe: 'jupiter', d_km: 139822, pos, vel, name: 'Rogue Jupiter', countScale: 1.0 });
+    },
+    headlines: [
+      { t: 2, text: 'Rogue gas giant inbound. Trajectory: "near miss". Mood: not reassured.' },
+      { cond: 'approach', text: 'Jupiter fills the sky. Tides filing for overtime.' },
+      { t: 90000, text: 'Flyby complete. Earth’s orbit described as "previously owned"' },
+      { t: 180000, text: 'Astronomers recalculating seasons. All of them.' },
     ],
   },
   {
