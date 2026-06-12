@@ -483,7 +483,16 @@ export class Sim {
     // ceiling has forced a tiny dt (a hypervelocity/relativistic impactor) is the larger budget it
     // physically needs unlocked — the impact is brief, so the short, heavier burst is worth it.
     const hyper = !this.frozen && dtSubMax < 0.5;
-    const liveCap = this.frozen ? 12 : (hyper ? 32 : 4);
+    // SUBSTEP THROUGHPUT GOVERNOR: the live budget of 4/frame was tuned so weak GPUs never
+    // stutter — but it also caps a 4090 at 4 tiny steps per frame at 1M particles (slo-mo with
+    // the GPU mostly idle). Climb the budget slowly while frames stay fast, drop it fast when
+    // they sag: big GPUs buy back sim-rate at high N, small ones never leave the floor.
+    if (!this.frozen) {
+      const fps = this.fps || 60;
+      if (fps > 47) this._subBoost = Math.min((this._subBoost || 4) + 0.25, 24);
+      else if (fps < 30) this._subBoost = Math.max((this._subBoost || 4) - 1, 4);
+    }
+    const liveCap = this.frozen ? 12 : (hyper ? 32 : Math.round(this._subBoost || 4));
     let want = warp * dtWallSim;
     let substeps = clamp(Math.ceil(want / dtSubMax), 1, liveCap);
     let dtSub = Math.min(want / substeps, dtSubMax);
