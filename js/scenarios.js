@@ -159,6 +159,32 @@ export const SCENARIOS = [
     ],
   },
   {
+    id: 'cradle', title: 'Newton’s Cradle', skulls: 5,
+    blurb: 'A second Moon arrives on our Moon’s orbit — exact same mass, exact same speed, opposite direction. The collision cancels the orbital momentum almost perfectly. What’s left doesn’t orbit anything. It falls. ETA: 4.8 days.',
+    warp0: 4000, focus: 'body:Moon', camDist: 60,
+    view: { orbits: true, belt: false, trails: true, autoFrame: true },
+    build(ctx) {
+      // intercept the Moon head-on along its own velocity: equal mass + mirrored velocity
+      // → the merger's momentum cancels by SYMMETRY (robust to splash losses), unlike the
+      // old Ceres trick shot whose hypervelocity crater never transferred cleanly.
+      const T = 60000, dt = 600;
+      const a = ctx.predict('Moon', T), b = ctx.predict('Moon', T - dt);
+      const v = [(a[0] - b[0]) / dt, (a[1] - b[1]) / dt, (a[2] - b[2]) / dt];
+      const sp = Math.hypot(...v) || 1e-6;
+      const ahead = v.map((x) => x / sp);
+      const pos = [a[0] + ahead[0] * sp * T, a[1] + ahead[1] * sp * T, a[2] + ahead[2] * sp * T];
+      const vel = ahead.map((x) => -x * sp);
+      ctx.spawnImpactor({ recipe: 'moon', d_km: 3474, pos, vel, name: 'Anti-Moon', countScale: 3 });
+    },
+    headlines: [
+      { t: 2, text: 'Second Moon detected, inbound on the first Moon’s lane. Phase: waning hostile.' },
+      { t: 30000, text: 'The two Moons are closing at 2 km/s. Romantics misread the situation entirely.' },
+      { cond: 'contact', text: 'MOONS COLLIDE — combined orbital momentum: zero. Altitude: now a countdown.' },
+      { cond: 'after:90000', text: 'The wreckage is not in orbit. It is in line. With us.' },
+      { cond: 'after:380000', text: 'Double-moon arrival imminent. Tide tables replaced by obituary.' },
+    ],
+  },
+  {
     id: 'wrongway', title: 'Oncoming Traffic', skulls: 5,
     blurb: 'A 300 km iron asteroid in a retrograde orbit — our lane, opposite direction. Head-on closing speed: 72 km/s, the fastest hit nature can deliver. No relativity required; the solar system just drives on both sides of the road.',
     warp0: 600, focus: 'earth', camDist: 140,
@@ -173,6 +199,36 @@ export const SCENARIOS = [
       { cond: 'approach', text: '72 km/s closing speed. Headlights useless.' },
       { cond: 'contact', text: 'HEAD-ON COLLISION — crust totaled, no exchange of insurance' },
       { cond: 'after:5400', text: 'Mantle declared open to the public' },
+    ],
+  },
+  {
+    id: 'captive', title: 'The Captive', skulls: 5,
+    blurb: 'A 1,500 km interloper, freshly captured into a plunging ellipse. Perigee: 9,500 km — deep inside the Roche zone. Every pass, the tides take a bite and the orbit shrinks. It doesn’t hit Earth today. It hits Earth eventually. That’s worse.',
+    warp0: 20000, focus: 'earth', camDist: 280,
+    view: { orbits: true, belt: false, trails: true, autoFrame: true },
+    build(ctx) {
+      // already-bound ellipse: apogee 120 Mm, perigee 9.5 Mm (1.5 R⊕, inside the fluid Roche
+      // limit for rock). Each perigee pass the live tides shed mass and energy, so the orbit
+      // DECAYS pass by pass — capture-spiral, drawn out by the trail. Spawned at apogee with
+      // the exact vis-viva tangential speed.
+      const rA = 120, rP = 9.5, mu = 3.986e-4;            // mu = G_SIM * M_earth
+      const vA = Math.sqrt(mu * (2 / rA - 2 / (rA + rP)));
+      const u = ctx.dirFromAngles(40, 14);                 // apogee direction
+      const k = [0.0, 0.26, 0.966];                        // orbit normal — tilted plane
+      const t = [k[1] * u[2] - k[2] * u[1], k[2] * u[0] - k[0] * u[2], k[0] * u[1] - k[1] * u[0]];
+      const tl = Math.hypot(t[0], t[1], t[2]) || 1;
+      ctx.spawnImpactor({
+        recipe: 'rock', d_km: 1500, countScale: 2, name: 'The Captive',
+        pos: [u[0] * rA, u[1] * rA, u[2] * rA],
+        vel: [t[0] / tl * vA, t[1] / tl * vA, t[2] / tl * vA],
+      });
+    },
+    headlines: [
+      { t: 2, text: 'Interloper captured into Earth orbit. Astronomers: "temporarily."' },
+      { t: 40000, text: 'First perigee pass in 3… 2… brace for gravel' },
+      { cond: 'approach', text: 'Perigee. The object is visibly losing arguments with the tides.' },
+      { cond: 'contact', text: 'SURFACE CONTACT — the orbit has finished shrinking' },
+      { cond: 'after:7200', text: 'Earth has eaten a moon. Feeling full, running a temperature.' },
     ],
   },
   {

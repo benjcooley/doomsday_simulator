@@ -994,7 +994,10 @@ export class Sim {
       }
       return null;
     }
-    if (this.contacts.size > 0 || best.gap < e.R * 2.2) {
+    // Earth close-up only when the action is actually AT Earth — a contact far away
+    // (moons colliding out at lunar distance, a grazing thief escaping) keeps the wide
+    // two-shot of Earth + the threat, so off-world act-one stays on screen.
+    if (best.gap < e.R * 2.2) {
       return { pos: vadd(this.anchor.pos, e.pos), dist: clamp(e.R * 6, 8, 1e5) };
     }
     const mid = vadd(e.pos, vscale(vsub(best.b.pos, e.pos), 0.5));
