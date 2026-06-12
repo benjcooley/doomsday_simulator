@@ -116,6 +116,71 @@ fn scatter(@builtin(global_invocation_id) gid: vec3u) {
 }
 `;
 
+// ---- stage 4: 27-cell neighbor walk (with hash-collision dedupe) ----
+// Used by the validation harness to prove completeness; the production force kernel
+// uses this exact same walk structure around the shared pair-physics chunk.
+export const NEIGHBOR_WGSL = /* wgsl */`
+struct WalkParams {
+  invCell: f32,
+  nActive: u32,
+  hashSize: u32,
+  reach2: f32,     // interaction reach², f32
+}
+${HASH_FNS}
+@group(0) @binding(0) var<uniform> WP: WalkParams;
+@group(0) @binding(1) var<storage, read> posW: array<vec4f>;
+@group(0) @binding(2) var<storage, read> offsetsW: array<u32>;
+@group(0) @binding(3) var<storage, read> countsW: array<u32>;
+@group(0) @binding(4) var<storage, read> sortedW: array<u32>;
+@group(0) @binding(5) var<storage, read_write> outCount: array<u32>;
+@group(0) @binding(6) var<storage, read_write> outISum: array<u32>;
+
+@compute @workgroup_size(256)
+fn walkNeighbors(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= WP.nActive) { return; }
+  let pi = posW[i].xyz;
+  let c = cellCoord(pi, WP.invCell);
+
+  // gather the ≤27 neighbor-cell hashes, deduped: two adjacent cells may collide into the
+  // same slot, and walking a slot twice would double-count every pair in it
+  var hashes: array<u32, 27>;
+  var nh = 0u;
+  for (var dz = -1; dz <= 1; dz = dz + 1) {
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+      for (var dx = -1; dx <= 1; dx = dx + 1) {
+        let h = cellHash(c + vec3i(dx, dy, dz));
+        var dup = false;
+        for (var k = 0u; k < nh; k = k + 1u) {
+          if (hashes[k] == h) { dup = true; break; }
+        }
+        if (!dup) { hashes[nh] = h; nh = nh + 1u; }
+      }
+    }
+  }
+
+  var count = 0u;
+  var isum = 0u;
+  for (var k = 0u; k < nh; k = k + 1u) {
+    let h = hashes[k];
+    let start = offsetsW[h];
+    let end = start + countsW[h];
+    for (var s = start; s < end; s = s + 1u) {
+      let j = sortedW[s];
+      if (j == i) { continue; }
+      let d = posW[j].xyz - pi;
+      let r2 = dot(d, d);
+      if (r2 < WP.reach2) {
+        count = count + 1u;
+        isum = isum + j;
+      }
+    }
+  }
+  outCount[i] = count;
+  outISum[i] = isum;
+}
+`;
+
 // JS mirror of the WGSL hash — single source of truth for tests.
 // Math.fround replicates the GPU's f32 multiply exactly (IEEE: f32 op == fround(f64 op on f32 inputs)),
 // so boundary positions land in the same cell on both sides — bit-exact comparisons hold.
