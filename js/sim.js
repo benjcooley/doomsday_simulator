@@ -394,18 +394,28 @@ export class Sim {
     this.warpSmooth = Math.max(0.02, this.warpUser);
 
     // proximity from mirror → dt limits + cinematic auto-slow
-    let minGap = 1e12, closing = 0, gapSumR = 1;
+    let minGap = 1e12, closing = 0, gapSumR = 1, tWakeMin = Infinity, wakeNow = false, nearWake = false;
     for (let i = 0; i < this.mirror.length; i++) {
       for (let j = i + 1; j < this.mirror.length; j++) {
         const a = this.mirror[i], b = this.mirror[j];
+        if (a.consumed || b.consumed) continue;
         const d = vsub(b.pos, a.pos);
         const dist = vlen(d);
         const gap = dist - a.R - b.R;
+        const vr = vsub(b.vel, a.vel);
+        const cl = -vdot(vr, d) / Math.max(dist, 1e-6);
+        // WAKE RULE, per pair: stay frozen until bodies are VERY CLOSE (2 radii) — unless the
+        // closing speed needs more run-up (~60 s of live approach). Evaluated over EVERY pair:
+        // the closest pair is often the (non-closing) Moon, which masked a 0.4c lance far out.
+        const wg = Math.max(2 * (a.R + b.R), cl > 0 ? cl * 60 : 0);
+        if (gap < wg) wakeNow = true;
+        if (gap < wg * 1.6) nearWake = true;            // hysteresis band: don't re-freeze at the line
+        // soonest time-to-wake over every closing pair — the frozen cruise must never step past it
+        if (cl > 1e-9) tWakeMin = Math.min(tWakeMin, (gap - wg) / cl);
         if (gap < minGap) {
           minGap = gap;
           gapSumR = a.R + b.R;
-          const vr = vsub(b.vel, a.vel);
-          closing = -vdot(vr, d) / Math.max(dist, 1e-6);
+          closing = cl;
         }
       }
     }
@@ -415,7 +425,10 @@ export class Sim {
       const tClose = minGap / closing;
       warp = Math.min(warp, Math.max(120, tClose / 5));
     }
-    if (minGap < 0.5 * gapSumR) warp = Math.min(warp, 1500);   // carnage in slow-mo
+    // carnage in slow-mo — and HOLD it: once contact has happened, the cap stays for as long
+    // as the live physics runs (no sudden post-impact fast-forward when the fine-dt throttle
+    // releases). It lifts naturally when the aftermath settles and the sim freezes to cruise.
+    if ((minGap < 0.5 * gapSumR || (this._firstContactT && !this.frozen))) warp = Math.min(warp, 1500);
     // While a freshly-spawned blob is still settling, hold warp down so it gets real wall-time
     // to relax under gravity with small timesteps — otherwise high warp takes giant steps and
     // the planet shock-heats itself white before anything even hits it.
@@ -454,16 +467,15 @@ export class Sim {
     // every step and the planet eventually detonates at rest. Keep the same 5× margin at every N
     // instead: identical behavior at 42k, proportionally finer steps at half a million particles.
     const dtCap = clamp(this.ps.dtStable * 5, 0.3, 8);
-    const WAKE = 4, SLEEP = 6;        // hysteresis, in units of (Ra + Rb)
     if (this._wake && this.frozen) { this._wake = false; this.frozen = false; }
     if (this.frozen) {
-      if (disturbed || minGap < WAKE * gapSumR) {
+      if (disturbed || wakeNow) {
         this.frozen = false;          // wake: hand the rigid offset back, resume live physics
         for (const b of this.mirror) {
           out.shifts.push({ slot: b.slot, dp: vsub(b.pos, b.freezePos), dv: vsub(b.vel, b.freezeVel) });
         }
       }
-    } else if (!disturbed && (minGap > SLEEP * gapSumR || (!settling && allQuiet))) {
+    } else if (!disturbed && (!nearWake || (!settling && allQuiet))) {
       // NOTE: the settle window no longer blocks freezing when every body is far apart —
       // a scenario LOADS frozen (no visible churn at start, like cruise). The lattice
       // relaxes later during the live approach window, held rigid by settle drag.
@@ -473,22 +485,19 @@ export class Sim {
     // freeze-gate telemetry
     this._minGapR = minGap / gapSumR;
     this._settling = settling;
-    this._wakeR = WAKE; this._sleepR = SLEEP;
+    this._wakeR = 2; this._sleepR = 3.2;   // nominal (radii); speed run-up can widen the trigger
     // why is the expensive sim awake? (sim._gateWhy in the console — no more guessing)
     this._gateWhy = this.frozen ? 'frozen'
       : settling ? 'settling'
       : disturbed ? (this.contacts.size > 0 ? 'contacts' : this.dissolveGo ? 'dissolve' : dSunEarth < 42000 ? 'sun' : 'aftermath')
-      : minGap < WAKE * gapSumR ? 'proximity' : 'awake(hysteresis)';
+      : wakeNow ? 'proximity' : 'awake(hysteresis)';
 
     // timestep ceiling. Frozen cruise takes huge steps when far, but must not step PAST the
     // wake point (so a fast/relativistic impactor can't tunnel through it). Live physics is
     // capped near the stable dt, shrinking further on close approach (lance slow-mo).
     let dtSubMax;
     if (this.frozen) {
-      dtSubMax = 1200;
-      if (closing > 1e-9 && minGap > WAKE * gapSumR) {
-        dtSubMax = clamp((minGap - WAKE * gapSumR) / closing, 2, 1200);
-      }
+      dtSubMax = isFinite(tWakeMin) ? clamp(tWakeMin, 0.05, 1200) : 1200;
     } else {
       // Drive dt by the fastest body motion near Earth. Using a body's SPEED (not the closing
       // rate, which flips sign at Earth's centre) keeps a penetrator at a fine timestep through
@@ -527,6 +536,11 @@ export class Sim {
     }
     const liveCap = this.frozen ? 12 : (hyper ? 32 : Math.round(this._subBoost || 4));
     let want = warp * dtWallSim;
+    // FROZEN NO-TUNNEL, TOTAL-ADVANCE EDITION: the old cap bounded each SUBSTEP at the
+    // time-to-wake but the frame takes up to 12 of them — a 0.4c lance hopped the entire
+    // wake shell inside one cruise frame and sailed through Earth without waking the sim.
+    // Cap the whole frame's advance instead; the wake check next tick then cannot miss.
+    if (this.frozen && isFinite(tWakeMin)) want = Math.min(want, Math.max(tWakeMin, 0.05));
     let substeps = clamp(Math.ceil(want / dtSubMax), 1, liveCap);
     let dtSub = Math.min(want / substeps, dtSubMax);
     const simDt = dtSub * substeps;
@@ -619,7 +633,8 @@ export class Sim {
     if (this.statsCache && this.statsBase) {
       const es = this.statsCache.bodies[0];
       const sT = es ? 288 + (es.surfT - (this.statsBase.surfT[0] || 288)) : 288;
-      if (es && (sT > 430 || this.moltenDelta(0) > 0.012)) this.dissolveGo = true;
+      // temp/molten only dissolve the globe after a REAL event — wake-relaxation churn must not
+      if (realEvent && es && (sT > 430 || this.moltenDelta(0) > 0.012)) this.dissolveGo = true;
       if (sT > 330) this._fireCond('hot:330');
       if (sT > 373) this._fireCond('hot:373');
       if (sT > 1500) this._fireCond('hot:1500');
@@ -627,11 +642,19 @@ export class Sim {
     this._updateDissolve(dtWall);
     this._updateSunConsumption();
 
+    // first-contact clock — drives 'after:' headlines AND the held impact slow-mo
+    if (this.contacts.size > 0 && !this._firstContactT) {
+      this._firstContactT = this.simTime;
+      // pull the DIAL itself down to the slow-mo rate: the request was still sitting at the
+      // pre-impact cruise warp (e.g. Moonfall's 30000×), so the instant the aftermath froze,
+      // the throttle vanished and time snapped to warp speed. Now the held rate is the real
+      // request — it stays slow after the dust settles until the user pushes the dial up.
+      this.warpUser = Math.min(this.warpUser, 1500);
+    }
     // timed headlines
     for (const ev of this.events) {
       if (!ev.fired && ev.t !== undefined && this.simTime >= ev.t) this._fire(ev);
       if (!ev.fired && ev.cond && ev.cond.startsWith('after:') && this.contacts.size > 0) {
-        if (!this._firstContactT) this._firstContactT = this.simTime;
         if (this.simTime - this._firstContactT > parseFloat(ev.cond.slice(6))) this._fire(ev);
       }
     }
@@ -1127,10 +1150,22 @@ export class Sim {
       if (b.slot > 0 && b.shellTex && b.shellFade > 0.9 && !b.consumed) hideMask |= (1 << b.slot);
     }
 
-    // pristine-blob shells (Moon, rogue Mars/Jupiter/Earth2): textured sphere until first violence
+    // pristine-blob shells (Moon, rogue Mars/Jupiter/Earth2): textured sphere until ACTUAL
+    // violence or near-touch. The sim waking early must NOT strip the shell — wake-relaxation
+    // churn trips molten/boundLoss readings, so those only count after a real event.
+    const realEventNow = this._heatArmed || this.contacts.size > 0;
     for (const b of this.mirror) {
       if (!b.shellTex || b.slot === 0) continue;
-      const violated = b.touched || this.moltenDelta(b.slot) > 0.01 || this.boundLoss(b.slot) > 0.02;
+      let gapNear = Infinity, sumRNear = 1;
+      for (const o of this.mirror) {
+        if (o === b || o.consumed) continue;
+        const g = vlen(vsub(o.pos, b.pos)) - o.R - b.R;
+        if (g < gapNear) { gapNear = g; sumRNear = o.R + b.R; }
+      }
+      // same trigger as Earth's globe (gap <= 0): every body in a colliding pair converts on
+      // the SAME frame — A's gap to B is B's gap to A. (sumRNear kept for future tuning.)
+      const violated = b.touched || gapNear <= 0 ||
+        (realEventNow && (this.moltenDelta(b.slot) > 0.01 || this.boundLoss(b.slot) > 0.02));
       if (violated && b.shellFade > 0) b.shellFade = Math.max(0, b.shellFade - dtWall / 0.9);
       if (b.shellFade > 0.012) {
         // anchor the shell to the particle blob's actual center of mass (extrapolated forward
@@ -1138,7 +1173,10 @@ export class Sim {
         // from the particles it represents
         const sb = this.statsCache && this.statsCache.bodies[b.slot];
         let localPos = b.pos;
-        if (sb && sb.count > 2) {
+        // LIVE: anchor the shell to the blob's extrapolated CoM (particles can drift from the
+        // mirror). FROZEN: the mirror IS the truth (particles are slaved to it via shifts) —
+        // readback extrapolation there only adds 0.7 s stair-step jumps against the trail head.
+        if (!this.frozen && sb && sb.count > 2) {
           const dtTag = this.simTime - (this.statsCache.simTimeTag ?? this.simTime);
           localPos = vadd(sb.com, vscale(sb.cov, dtTag));
         }
