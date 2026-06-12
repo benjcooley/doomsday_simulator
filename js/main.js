@@ -160,6 +160,7 @@ async function start() {
     sim.ejecta = ejecta;
 
     const ui = new UI(sim, camera, renderer, {
+      machinePick: prof.suggested,   // the profiler's calibrated pick = the topbar MED tier
       loadScenario(id, date) {
         sim.loadScenario(id, date);
         ui.syncScenario();

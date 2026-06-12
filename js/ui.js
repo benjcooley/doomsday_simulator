@@ -86,6 +86,22 @@ export class UI {
     };
     this.warpReadout = this._el('div', 'warp-readout', tb, '—');
 
+    // --- DENSITY: three machine-calibrated particle counts, labeled with the counts
+    // themselves (mid = the GPU profiler's pick, high = 3× it, low = ⅓). High particle
+    // counts change the sim's whole feel — surface this up top so people actually try it.
+    const densWrap = this._el('div', 'tb-group', tb);
+    this._el('span', 'tb-label', densWrap, 'DENSITY');
+    const mp = Math.max(8192, this.cb.machinePick || 16384);
+    const rk = (n) => Math.round(clamp(n, 4096, 1048576) / 1000) * 1000;
+    const dk = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : n);
+    this.densTiers = [rk(mp / 3), rk(mp), rk(mp * 3)];
+    this.densBtns = this.densTiers.map((n, i) => {
+      const b = this._el('button', 'btn small dens', densWrap, dk(n));
+      b.title = `${n.toLocaleString()} particles — ${['light & fast', 'calibrated for this GPU', '3× the calibrated pick — the high-density feel'][i]} (rebuilds the scenario)`;
+      b.onclick = () => this._setQuality(n);
+      return { b, n };
+    });
+
     const focusWrap = this._el('div', 'tb-group', tb);
     this._el('span', 'tb-label', focusWrap, 'FOCUS');
     this.focusSel = this._el('select', 'focus-sel', focusWrap);
@@ -254,18 +270,18 @@ export class UI {
     const fmtQ = (n) => (n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : n);
     qOut.textContent = fmtQ(this.sim.quality);
     this.qDial.addEventListener('input', () => { qOut.textContent = fmtQ(qFromDial(parseInt(this.qDial.value))); });
-    this.qDial.addEventListener('change', () => {
-      const n = qFromDial(parseInt(this.qDial.value));
-      if (Math.round(n * 1.6) > (this.sim.ps.maxN || 65536)) {
-        // beyond this session's buffer allocation — relaunch with the bigger cap
-        const u = new URL(location.href);
-        u.searchParams.set('q', n);
-        u.searchParams.set('scenario', this.sim.scenarioId);
-        location.href = u.toString();
-        return;
+    this.qDial.addEventListener('change', () => this._setQuality(qFromDial(parseInt(this.qDial.value))));
+    // keep dial, readout and the topbar DENSITY buttons agreeing with sim.quality
+    this._qSync = () => {
+      this.qDial.value = dialFromQ(this.sim.quality);
+      qOut.textContent = fmtQ(this.sim.quality);
+      if (this.densBtns) {
+        for (const { b, n } of this.densBtns) {
+          b.classList.toggle('toggled', Math.abs(this.sim.quality - n) <= Math.max(1024, n * 0.06));
+        }
       }
-      this.cb.setQuality(n);
-    });
+    };
+    this._qSync();
 
     // ---- HUD ----
     const hud = this._el('div', 'hud');
@@ -374,6 +390,20 @@ export class UI {
   setWarp(v) {
     this.sim.warpUser = Math.min(WMAX, Math.max(WMIN, v));
     this._syncWarpBtns();
+  }
+
+  // single path for ALL quality changes (topbar buttons + sidebar dial): rebuild in place
+  // when it fits this session's buffers, relaunch with a bigger cap when it doesn't
+  _setQuality(n) {
+    if (Math.round(n * 1.6) > (this.sim.ps.maxN || 65536)) {
+      const u = new URL(location.href);
+      u.searchParams.set('q', n);
+      u.searchParams.set('scenario', this.sim.scenarioId);
+      location.href = u.toString();
+      return;
+    }
+    this.cb.setQuality(n);
+    if (this._qSync) this._qSync();
   }
 
   _syncWarpBtns() {
