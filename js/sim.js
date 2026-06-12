@@ -177,6 +177,12 @@ export class Sim {
         const az = azDeg * Math.PI / 180, el = elDeg * Math.PI / 180;
         return [Math.cos(el) * Math.cos(az), Math.cos(el) * Math.sin(az), Math.sin(el)];
       },
+      // Earth's orbital direction of travel (unit, local-frame axes) — place things
+      // "on our forward path" with this instead of guessing absolute azimuths
+      prograde() {
+        const v = sim.anchor.vel;
+        return vlen(v) > 1e-9 ? vnorm(v) : [1, 0, 0];
+      },
       // predict a body's position t seconds ahead (sun + mutual gravity, coarse steps) —
       // Earth wobbles ~20 Mm per Pluto-flight from the Moon's pull; dead reckoning misses
       predict(name, t) {

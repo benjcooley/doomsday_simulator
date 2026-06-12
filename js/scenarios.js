@@ -237,7 +237,7 @@ export const SCENARIOS = [
     warp0: 8000, focus: 'earth', camDist: 700,
     view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
-      const dir = ctx.dirFromAngles(200, 16);
+      const dir = ctx.prograde();   // dead ahead on Earth's orbital path — we drive INTO it
       // MISS by design — the damage is gravitational. Aim offset must out-budget
       // gravitational focusing: b² = r_min² + 2·μ_J·r_min/v∞², so passing at r_min≈150 Mm
       // (2.1 Jupiter radii) at 22 km/s needs b≈320 Mm. (b=150 actually GRAZES the cloud tops.)
