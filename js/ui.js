@@ -141,6 +141,12 @@ export class UI {
     this._el('span', 'tb-label', focusWrap, 'FOCUS');
     this.focusSel = this._el('select', 'focus-sel', focusWrap);
     this.focusSel.addEventListener('change', () => this._focus(this.focusSel.value));
+    const sunLockBtn = this._el('button', 'btn small toggled', focusWrap, '☀');
+    sunLockBtn.title = 'Sun-locked view: the camera bearing follows the Sun, so the solar system doesn’t appear to orbit the focused body (orbital motion shows as the stars slowly turning). Click for the raw inertial view.';
+    sunLockBtn.onclick = () => {
+      this.camera.sunLock = !this.camera.sunLock;
+      sunLockBtn.classList.toggle('toggled', this.camera.sunLock);
+    };
 
     const resetBtn = this._el('button', 'btn danger', tb, 'RESET EARTH');
     resetBtn.onclick = () => this.cb.loadScenario(this.sim.scenarioId);

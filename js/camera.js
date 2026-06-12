@@ -24,6 +24,8 @@ export class OrbitCamera {
     this.manualFocus = false;       // a user focus pick overrides cinematic auto-framing
     this.manual = false;            // user has taken control
     this.idle = true;               // pre-first-input cinematic drift
+    this.sunLock = true;            // bearing co-rotates with the focus→Sun line: the Sun stays
+    this._sunBearing = null;        // put, and orbital motion reads as the skybox slowly turning
 
     const takeControl = () => { this.manual = true; this.idle = false; };
     canvas.addEventListener('pointerdown', (e) => {
@@ -95,6 +97,24 @@ export class OrbitCamera {
     this.focusPos = vlerp(this.focusPos, desiredPos, 1 - Math.exp(-5 * dt));
     this.dist += (desiredDist - this.dist) * (1 - Math.exp(-6 * dt));
     if (this.idle && !this.manual) this.yaw += dt * 0.02;   // gentle pre-input drift only
+
+    // SUN-LOCKED bearing: rotate the camera azimuth by the frame-to-frame change in the
+    // focus→Sun direction, so the Sun holds still in view instead of the solar system
+    // appearing to orbit the focused body (a year at 1wk/s = a full Ptolemaic lap in ~52 s).
+    // Pure camera yaw — planets, belt, particles, skybox all stay consistent for free; the
+    // skybox turning once per year IS the focused body's orbital motion, shown correctly.
+    if (this.sunLock) {
+      const fp = this.focusPos;                  // heliocentric: the Sun is the origin
+      if (fp[0] * fp[0] + fp[1] * fp[1] > 2.5e7) {   // skip when focused on/near the Sun itself
+        const b = Math.atan2(-fp[1], -fp[0]);
+        if (this._sunBearing !== null) {
+          let db = b - this._sunBearing;
+          if (db > Math.PI) db -= 2 * Math.PI; else if (db < -Math.PI) db += 2 * Math.PI;
+          this.yaw += db;
+        }
+        this._sunBearing = b;
+      } else this._sunBearing = null;
+    } else this._sunBearing = null;
   }
 
   // camera position relative to focus (render frame origin = focus)
