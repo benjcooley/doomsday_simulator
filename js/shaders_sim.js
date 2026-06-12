@@ -144,8 +144,16 @@ ${nearGravity ? `          let invR = inverseSqrt(r2 + P.eps2);
             let n = d * (1.0 / max(r, 1e-6));
             // dt-aware clamps: unconditionally stable at any timestep (springs go soft, never explosive).
             // cMax budgets TOTAL damping across ~8 simultaneous neighbors, not per pair.
-            let kMax = 0.20 * mi / (P.dt * P.dt);
-            let cMax = 0.08 * mi / P.dt;
+            // PAIR-SYMMETRIC: budget by the LIGHTER side so both particles derive the IDENTICAL
+            // clamped spring/damper. Budgeting by self-mass (mi) broke Newton's 3rd law wherever
+            // masses differ across a contact — ocean water vs 3x-heavier crust: crust pushed with
+            // full k while water answered with a clamped k, a perpetual momentum/energy pump at
+            // every material interface. That was the hovering ocean shell, the at-rest surface
+            // heating that grew with N, and the post-impact white fountains (single-material
+            // bodies like Mars were immune). Lighter-side budget keeps both sides stable.
+            let mPair = min(mi, mj);
+            let kMax = 0.20 * mPair / (P.dt * P.dt);
+            let cMax = 0.08 * mPair / P.dt;
             let kp = min(min(kI, abs(aux.y)), kMax);
             let cohp = min(min(cohI, aux.z), kMax * 0.5);
             let dv = pvel.xyz - vi;
