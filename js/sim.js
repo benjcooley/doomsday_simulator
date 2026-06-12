@@ -377,9 +377,11 @@ export class Sim {
     }
 
     // smooth warp changes in log space (cinematic ramps, plays well with the slow-mo dial)
-    const wTarget = Math.max(0.02, this.warpUser);
-    this.warpSmooth = Math.exp(lerp(Math.log(Math.max(0.02, this.warpSmooth)), Math.log(wTarget), Math.min(1, dtWall * 5)));
-    if (Math.abs(Math.log(this.warpSmooth / wTarget)) < 0.01) this.warpSmooth = wTarget;
+    // user warp applies INSTANTLY. (This used to ease in log space — a relic from when warp
+    // directly scaled the timestep. A 60×→1wk/s jump is ~9 decades, so the ramp delayed the
+    // user's input by ~2 s for nothing: dtSubMax, dtCap, the substep budgets and the frozen
+    // no-tunnel cap already bound every physics step regardless of how warp jumps.)
+    this.warpSmooth = Math.max(0.02, this.warpUser);
 
     // proximity from mirror → dt limits + cinematic auto-slow
     let minGap = 1e12, closing = 0, gapSumR = 1;
