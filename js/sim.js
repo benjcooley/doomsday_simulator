@@ -407,8 +407,13 @@ export class Sim {
     const es0 = this.statsCache ? this.statsCache.bodies[0] : null;
     const dSunEarth = vlen(vadd(this.mirror[0].pos, this.anchor.pos));
     const surfT0adj = es0 && this.statsBase ? 288 + (es0.surfT - (this.statsBase.surfT[0] || 288)) : 288;
+    // temperature/molten/boundLoss only count as disturbance AFTER a real event (contact,
+    // sun-plunge, anything touched) — same rule the heat gate uses. Before that they're
+    // spawn-settle artifacts (at 1M particles the loose ocean shell alone trips 1% boundLoss),
+    // and they were latching the sim LIVE through entire approach cruises for nothing.
+    const realEvent = this._heatArmed || this.contacts.size > 0 || this.mirror.some((b) => b.touched);
     const disturbed = this.contacts.size > 0 || this.dissolveGo ||
-      surfT0adj > 400 || this.moltenDelta(0) > 0.01 || this.boundLoss(0) > 0.01 ||
+      (realEvent && (surfT0adj > 400 || this.moltenDelta(0) > 0.01 || this.boundLoss(0) > 0.01)) ||
       dSunEarth < 42000;
     // aftermath sleep: when every body is mechanically at rest (per fresh readback), the
     // expensive dynamics can sleep even though "disturbed" — only heat keeps evolving
@@ -446,6 +451,11 @@ export class Sim {
     this._minGapR = minGap / gapSumR;
     this._settling = settling;
     this._wakeR = WAKE; this._sleepR = SLEEP;
+    // why is the expensive sim awake? (sim._gateWhy in the console — no more guessing)
+    this._gateWhy = this.frozen ? 'frozen'
+      : settling ? 'settling'
+      : disturbed ? (this.contacts.size > 0 ? 'contacts' : this.dissolveGo ? 'dissolve' : dSunEarth < 42000 ? 'sun' : 'aftermath')
+      : minGap < WAKE * gapSumR ? 'proximity' : 'awake(hysteresis)';
 
     // timestep ceiling. Frozen cruise takes huge steps when far, but must not step PAST the
     // wake point (so a fast/relativistic impactor can't tunnel through it). Live physics is
