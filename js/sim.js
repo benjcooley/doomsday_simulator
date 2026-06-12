@@ -394,7 +394,7 @@ export class Sim {
     this.warpSmooth = Math.max(0.02, this.warpUser);
 
     // proximity from mirror → dt limits + cinematic auto-slow
-    let minGap = 1e12, closing = 0, gapSumR = 1, tWakeMin = Infinity, tCloseMin = Infinity, wakeNow = false, nearWake = false;
+    let minGap = 1e12, closing = 0, gapSumR = 1, tWakeMin = Infinity, tCloseMin = Infinity, clSoon = 0, wakeNow = false, nearWake = false;
     for (let i = 0; i < this.mirror.length; i++) {
       for (let j = i + 1; j < this.mirror.length; j++) {
         const a = this.mirror[i], b = this.mirror[j];
@@ -417,7 +417,7 @@ export class Sim {
         if (cl > 1e-9) tWakeMin = Math.min(tWakeMin, (gap - wg) / cl);
         // soonest time-to-CONTACT — drives the cinematic slow-mo (time-based, so a 0.4c
         // closer two minutes out engages it even while the Moon is the closest pair)
-        if (cl > 1e-9 && gap > 0) tCloseMin = Math.min(tCloseMin, gap / cl);
+        if (cl > 1e-9 && gap > 0 && gap / cl < tCloseMin) { tCloseMin = gap / cl; clSoon = cl; }
         if (gap < minGap) {
           minGap = gap;
           gapSumR = a.R + b.R;
@@ -433,7 +433,12 @@ export class Sim {
     // Floor of 2× (was 120×) so ultrafast closers play their approach in fine-stepped frozen
     // slow-mo — the glint actually grows — at zero particle cost until the 2-radii wake shell.
     if (this.autoSlow && ((closing > 1e-9 && minGap > 0 && minGap < 30 * gapSumR) || tCloseMin < 120)) {
-      warp = Math.min(warp, Math.max(2, tCloseMin / 5));
+      // SPEED-AWARE floor: slow closers keep the classic 120x floor (Moonfall never grinds
+      // to 2x, and the contact-rate hold picks up seamlessly from ~120x — no jump at the
+      // hit). Fast closers scale down toward 2x for constant-ish on-screen approach speed:
+      // a 0.4c lance at 2x still crosses the sky briskly.
+      const floorW = clamp(1.2 / Math.max(clSoon, 1e-6), 2, 120);
+      warp = Math.min(warp, Math.max(floorW, tCloseMin / 5));
     }
     // carnage in slow-mo — and HOLD it: once contact has happened, the cap stays for as long
     // as the live physics runs (no sudden post-impact fast-forward when the fine-dt throttle
