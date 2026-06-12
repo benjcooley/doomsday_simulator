@@ -164,17 +164,16 @@ export const SCENARIOS = [
     warp0: 4000, focus: 'body:Moon', camDist: 60,
     view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
-      // intercept the Moon head-on along its own velocity: equal mass + mirrored velocity
-      // → the merger's momentum cancels by SYMMETRY (robust to splash losses), unlike the
-      // old Ceres trick shot whose hypervelocity crater never transferred cleanly.
+      // TIME-REVERSAL aiming: spawn the Anti-Moon at the Moon's position at time 2T with
+      // that point's velocity NEGATED. Gravity is time-symmetric, so it retraces the Moon's
+      // own orbit backwards and meets the real Moon at time T — exactly head-on, equal
+      // speed, with Earth's gravity and the orbit's curvature accounted for by construction.
+      // (A straight-line lead misses: Earth bends the shot by Moon-radii over the flight.)
+      // Equal mass + mirrored velocity → the merger's momentum cancels by symmetry.
       const T = 60000, dt = 600;
-      const a = ctx.predict('Moon', T), b = ctx.predict('Moon', T - dt);
-      const v = [(a[0] - b[0]) / dt, (a[1] - b[1]) / dt, (a[2] - b[2]) / dt];
-      const sp = Math.hypot(...v) || 1e-6;
-      const ahead = v.map((x) => x / sp);
-      const pos = [a[0] + ahead[0] * sp * T, a[1] + ahead[1] * sp * T, a[2] + ahead[2] * sp * T];
-      const vel = ahead.map((x) => -x * sp);
-      ctx.spawnImpactor({ recipe: 'moon', d_km: 3474, pos, vel, name: 'Anti-Moon', countScale: 3 });
+      const a = ctx.predict('Moon', 2 * T), b = ctx.predict('Moon', 2 * T - dt);
+      const vel = [(b[0] - a[0]) / dt, (b[1] - a[1]) / dt, (b[2] - a[2]) / dt];
+      ctx.spawnImpactor({ recipe: 'moon', d_km: 3474, pos: a, vel, name: 'Anti-Moon', countScale: 3 });
     },
     headlines: [
       { t: 2, text: 'Second Moon detected, inbound on the first Moon’s lane. Phase: waning hostile.' },
