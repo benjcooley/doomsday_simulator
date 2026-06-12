@@ -238,8 +238,10 @@ export const SCENARIOS = [
     view: { orbits: true, belt: false, trails: true, autoFrame: true },
     build(ctx) {
       const dir = ctx.dirFromAngles(200, 16);
-      // big impact parameter: this one is a MISS by design — the damage is gravitational
-      const { pos, vel } = ctx.approach(dir, 1600, 0.022, 150);
+      // MISS by design — the damage is gravitational. Aim offset must out-budget
+      // gravitational focusing: b² = r_min² + 2·μ_J·r_min/v∞², so passing at r_min≈150 Mm
+      // (2.1 Jupiter radii) at 22 km/s needs b≈320 Mm. (b=150 actually GRAZES the cloud tops.)
+      const { pos, vel } = ctx.approach(dir, 1600, 0.022, 320);
       ctx.spawnImpactor({ recipe: 'jupiter', d_km: 139822, pos, vel, name: 'Rogue Jupiter', countScale: 1.0 });
     },
     headlines: [
