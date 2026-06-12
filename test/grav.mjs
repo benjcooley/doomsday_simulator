@@ -130,5 +130,5 @@ export function gravResources(device, pipes, posBuf, n, gp) {
     cp = enc.beginComputePass();
     cp.setPipeline(pipes.pDeposit); cp.setBindGroup(0, bgDep); cp.dispatchWorkgroups(Math.ceil(n / 256)); cp.end();
   };
-  return { gravBuf, encode };
+  return { gravBuf, dpBuf, encode };
 }

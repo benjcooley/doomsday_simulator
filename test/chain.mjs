@@ -15,15 +15,18 @@ export async function makeSortChain(device) {
 }
 
 // builds all buffers, encodes the full chain, returns { buffers..., encode(enc) }
+// `pm` may be a Float32Array (uploads a fresh pos buffer) or { posBuf, n } to sort an
+// EXISTING evolving buffer (multi-step runs rebuild the grid from current positions).
 export function sortChainResources(device, chain, pm, cellSize) {
-  const n = pm.length / 4;
+  const ext = !(pm instanceof Float32Array);
+  const n = ext ? pm.n : pm.length / 4;
   const gp = new ArrayBuffer(16);
   new Float32Array(gp)[0] = 1 / cellSize;
   new Uint32Array(gp)[1] = n;
   new Uint32Array(gp)[2] = HASH_SIZE;
   const gpBuf = uniformBuf(device, new Uint32Array(gp), 'gp');
   const spBuf = uniformBuf(device, new Uint32Array([HASH_SIZE, 0, 0, 0]), 'sp');
-  const posBuf = storageBuf(device, pm, 'pos');
+  const posBuf = ext ? pm.posBuf : storageBuf(device, pm, 'pos');
   const cellOfBuf = emptyBuf(device, n * 4, 'cellOf');
   const countsBuf = emptyBuf(device, HASH_SIZE * 4, 'counts');
   const offsetsBuf = emptyBuf(device, HASH_SIZE * 4, 'offsets');
