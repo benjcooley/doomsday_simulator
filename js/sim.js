@@ -404,13 +404,17 @@ export class Sim {
         const gap = dist - a.R - b.R;
         const vr = vsub(b.vel, a.vel);
         const cl = -vdot(vr, d) / Math.max(dist, 1e-6);
-        // WAKE RULE, per pair: stay frozen until bodies are VERY CLOSE (2 radii) — even for a
-        // 0.4c closer. The frozen cruise fine-steps the approach safely (its total advance is
-        // capped at time-to-wake, so overshoot is impossible), and once awake the per-body
-        // hyper-stepper handles the final beat. NO speed run-up term: that woke the particle
-        // sim 60 s (= 7200 Mm!) early for the Lance. Evaluated over EVERY pair: the closest
-        // pair is often the (non-closing) Moon, which would otherwise mask a distant closer.
-        const wg = 2 * (a.R + b.R);
+        // WAKE RULE, per pair: normal bodies stay frozen until VERY CLOSE (2 radii).
+        // HYPERVELOCITY closers (>0.05 Mm/s, the live fine-dt threshold) wake ~100
+        // hyper-frames out: the hyper-stepper covers a FIXED ~12.8·minRp per frame, so a
+        // frame-count budget costs the same few wall-seconds at ANY particle count —
+        // a fixed distance (50·ΣR ≈ Moon's orbit) took 5 minutes of crawl at 1M, and
+        // 2·ΣR was a blink that read as "ignited inside the planet". Normal impactors
+        // untouched. Evaluated over EVERY pair: the closest pair is often the
+        // (non-closing) Moon, which would otherwise mask a distant fast closer.
+        const wg = cl > 0.05
+          ? Math.max(2 * (a.R + b.R), 1280 * (this.ps.minRp || 0.1))
+          : 2 * (a.R + b.R);
         if (gap < wg) wakeNow = true;
         if (gap < wg * 1.6) nearWake = true;            // hysteresis band: don't re-freeze at the line
         // soonest time-to-wake over every closing pair — the frozen cruise must never step past it
