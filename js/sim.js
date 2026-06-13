@@ -404,19 +404,15 @@ export class Sim {
         const gap = dist - a.R - b.R;
         const vr = vsub(b.vel, a.vel);
         const cl = -vdot(vr, d) / Math.max(dist, 1e-6);
-        // WAKE RULE, per pair: normal bodies stay frozen until VERY CLOSE (2 radii).
-        // HYPERVELOCITY closers (>0.05 Mm/s, the live fine-dt threshold) wake ~100
-        // hyper-frames out: the hyper-stepper covers a FIXED ~12.8·minRp per frame, so a
-        // frame-count budget costs the same few wall-seconds at ANY particle count —
-        // a fixed distance (50·ΣR ≈ Moon's orbit) took 5 minutes of crawl at 1M, and
-        // 2·ΣR was a blink that read as "ignited inside the planet". Normal impactors
-        // untouched. Evaluated over EVERY pair: the closest pair is often the
-        // (non-closing) Moon, which would otherwise mask a distant fast closer.
-        const wg = cl > 0.05
-          ? Math.max(2 * (a.R + b.R), 1280 * (this.ps.minRp || 0.1))
-          : 2 * (a.R + b.R);
+        // WAKE RULE: start ticking when the surface-to-surface gap drops below ~1.5× the sum of
+        // both radii — i.e. roughly when the impactor is within its own diameter of the surface,
+        // giving a little runway before contact. Same simple geometric test for everyone, a 0.4c
+        // Lance and a drifting Moon alike. Evaluated over EVERY pair (the closest pair is often
+        // the non-closing Moon, which must not mask a distant fast closer). The frozen no-tunnel
+        // cap below keeps a hypervelocity closer from stepping past this shell.
+        const wg = 1.5 * (a.R + b.R);
         if (gap < wg) wakeNow = true;
-        if (gap < wg * 1.6) nearWake = true;            // hysteresis band: don't re-freeze at the line
+        if (gap < wg * 2) nearWake = true;              // hysteresis band: don't re-freeze at the line
         // soonest time-to-wake over every closing pair — the frozen cruise must never step past it
         if (cl > 1e-9) tWakeMin = Math.min(tWakeMin, (gap - wg) / cl);
         // soonest time-to-CONTACT — drives the cinematic slow-mo (time-based, so a 0.4c
@@ -555,11 +551,12 @@ export class Sim {
     }
     const liveCap = this.frozen ? 12 : (hyper ? 32 : Math.round(this._subBoost || 4));
     let want = warp * dtWallSim;
-    // FROZEN NO-TUNNEL, TOTAL-ADVANCE EDITION: the old cap bounded each SUBSTEP at the
-    // time-to-wake but the frame takes up to 12 of them — a 0.4c lance hopped the entire
-    // wake shell inside one cruise frame and sailed through Earth without waking the sim.
-    // Cap the whole frame's advance instead; the wake check next tick then cannot miss.
-    if (this.frozen && isFinite(tWakeMin)) want = Math.min(want, Math.max(tWakeMin, 0.05));
+    // FROZEN NO-TUNNEL: cap the whole frame's advance at the time-to-reach-the-wake-shell, so
+    // a hypervelocity closer lands ON the shell and wakes next tick instead of stepping through
+    // it. The floor was 0.05 s — but at 0.4c that's a 6 Mm hop, big enough to skip the entire
+    // shell and bury the Lance inside Earth before the sim ever ticked. A tiny floor (1e-4 s)
+    // keeps progress without overshooting (≈12 km past the shell at 0.4c, negligible).
+    if (this.frozen && isFinite(tWakeMin)) want = Math.min(want, Math.max(tWakeMin, 1e-4));
     let substeps = clamp(Math.ceil(want / dtSubMax), 1, liveCap);
     let dtSub = Math.min(want / substeps, dtSubMax);
     const simDt = dtSub * substeps;
@@ -1163,10 +1160,14 @@ export class Sim {
     // particle hide-mask: bodies fully covered by an opaque shell (or Earth under its pristine
     // globe) draw NO particles — no readback-lag shimmer behind the shell, and a whole planet
     // of fill saved. The moment a shell starts fading (or the globe dissolving), particles return.
+    // "show particles" (forceParticles) means EXACTLY that: no globe, no shells, every body's
+    // particles visible — so the hide-mask must be empty and the shells skipped below.
     let hideMask = 0;
-    if (this.dissolve < 0.02) hideMask |= 1;
-    for (const b of this.mirror) {
-      if (b.slot > 0 && b.shellTex && b.shellFade > 0.9 && !b.consumed) hideMask |= (1 << b.slot);
+    if (!this.view.forceParticles) {
+      if (this.dissolve < 0.02) hideMask |= 1;
+      for (const b of this.mirror) {
+        if (b.slot > 0 && b.shellTex && b.shellFade > 0.9 && !b.consumed) hideMask |= (1 << b.slot);
+      }
     }
 
     // pristine-blob shells (Moon, rogue Mars/Jupiter/Earth2): textured sphere until ACTUAL
@@ -1186,7 +1187,7 @@ export class Sim {
       const violated = b.touched || gapNear <= 0 ||
         (realEventNow && (this.moltenDelta(b.slot) > 0.01 || this.boundLoss(b.slot) > 0.02));
       if (violated && b.shellFade > 0) b.shellFade = Math.max(0, b.shellFade - dtWall / 0.9);
-      if (b.shellFade > 0.012) {
+      if (b.shellFade > 0.012 && !this.view.forceParticles) {
         // anchor the shell to the particle blob's actual center of mass (extrapolated forward
         // from the last readback by its COM velocity) so the textured sphere never separates
         // from the particles it represents

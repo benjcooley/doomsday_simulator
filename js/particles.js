@@ -7,7 +7,9 @@ export const ABS_MAXN = 2097152;   // absolute ceiling (2M) — buffers allocate
                                    // cap below, so small machines never pay big-machine memory
 // drawn-sphere size vs physics radius: was 1.6-1.85, which visually swallowed ~2-radius
 // impact deformation — slimmer spheres let craters and dents actually show
-const VISR = { IRON: 1.35, ROCK: 1.45, CRUST: 1.45, WATER: 1.75, ICE: 1.55, GAS: 1.8, LAVA: 1.45, ARMED: 1.0 };
+// WATER/ICE drawn at the SAME size as crust so the ocean skin sits flush — a larger water
+// draw radius made every ocean particle bulge ~20% above the land into a bumpy surface.
+const VISR = { IRON: 1.35, ROCK: 1.45, CRUST: 1.45, WATER: 1.45, ICE: 1.45, GAS: 1.8, LAVA: 1.45, ARMED: 1.0 };
 
 export class ParticleSystem {
   async init(gpu, capN = 262144) {

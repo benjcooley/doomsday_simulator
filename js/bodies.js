@@ -24,13 +24,13 @@ export const MAT_TYPES = {
   IRON:  { cohF: 0.45, dampZ: 0.55, Tsol: 1700, Tliq: 1850, Tvap: 3300, cp: 450,  base: [0.42, 0.40, 0.43], emis: 0.0, densMul: 1.55 },
   ROCK:  { cohF: 0.32, dampZ: 0.50, Tsol: 1400, Tliq: 1700, Tvap: 3500, cp: 1000, base: [0.45, 0.36, 0.28], emis: 0.0, densMul: 0.92 },
   CRUST: { cohF: 0.30, dampZ: 0.50, Tsol: 1350, Tliq: 1650, Tvap: 3500, cp: 1000, base: [0.40, 0.34, 0.26], emis: 0.0, densMul: 0.88 },
-  // densMul near CRUST: at particle resolution the ocean is a single shell 70-270 km "deep"
-  // (Earth's real 4 km ocean can't be resolved), so a LOW-density ocean would buoyantly bulge
-  // above the crust into a bumpy surface. Near-crust density makes the ocean skin sit flush and
-  // smooth; water keeps its low cohesion / high cp / low vapor point for splash + boil drama.
-  // (Bonus: water was the lightest particle setting dtStable — heavier water → bigger stable dt.)
-  WATER: { cohF: 0.035, dampZ: 0.85, Tsol: 260,  Tliq: 273,  Tvap: 600,  cp: 4184, base: [0.06, 0.18, 0.42], emis: 0.0, densMul: 0.84 },
-  ICE:   { cohF: 0.22, dampZ: 0.60, Tsol: 250,  Tliq: 273,  Tvap: 550,  cp: 2100, base: [0.75, 0.85, 0.95], emis: 0.0, densMul: 0.84 },
+  // Water/ice are just CRUST with a tint. At particle resolution an "ocean" particle is a
+  // 70-270 km column that is >98% rock with a ~4 km water film on top — so physically it IS
+  // rock: same cohesion, damping, density, specific heat, and boil point. Modeling it as a
+  // low-cohesion, low-boil fluid only produced wrong behavior nobody could justify (jelly that
+  // squeezes over the land, a thin film "flash-boiling" a rock column). Only the COLOR differs.
+  WATER: { cohF: 0.30, dampZ: 0.50, Tsol: 1350, Tliq: 1650, Tvap: 3500, cp: 1000, base: [0.06, 0.18, 0.42], emis: 0.0, densMul: 0.88 },
+  ICE:   { cohF: 0.30, dampZ: 0.50, Tsol: 1350, Tliq: 1650, Tvap: 3500, cp: 1000, base: [0.75, 0.85, 0.95], emis: 0.0, densMul: 0.88 },
   GAS:   { cohF: 0.0,  dampZ: 0.90, Tsol: 1e6,  Tliq: 2e6,  Tvap: 3e6,  cp: 12000, base: [0.85, 0.72, 0.55], emis: 0.02, densMul: 1.0 },
   LAVA:  { cohF: 0.10, dampZ: 0.70, Tsol: 1400, Tliq: 1700, Tvap: 3500, cp: 1000, base: [0.35, 0.28, 0.22], emis: 0.0, densMul: 0.92 },
 };

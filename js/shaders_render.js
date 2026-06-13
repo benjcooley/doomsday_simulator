@@ -363,7 +363,9 @@ struct FOut { @location(0) col: vec4f, @builtin(frag_depth) depth: f32 }
   let R = reflect(-L, N);
   let isWater = in.col.b > in.col.r * 1.6 && in.col.b > 0.15;
   var spec = 0.0;
-  if (isWater) { spec = pow(max(dot(R, V), 0.0), 60.0) * 0.9 * diff; }
+  // glossy ocean: tightened + strengthened to match the smooth globe's specular, so the
+  // highlight reads even though water now draws flush with the crust (no bulge to catch light)
+  if (isWater) { spec = pow(max(dot(R, V), 0.0), 90.0) * 1.5 * diff; }
   var col = in.col * (diff * 1.30 + 0.015) + vec3f(spec);
   // thermal emission
   let T = in.T;
