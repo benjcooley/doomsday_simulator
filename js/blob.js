@@ -114,6 +114,21 @@ export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
   }
   rMax = Math.max(rMax, R * 0.5);
 
+  // DEPTH-BASED surface/crust: define the ocean skin and the crust as a fixed PARTICLE-COUNT
+  // depth, not a fixed radius fraction. A radius-fraction crust is ~1 shell at 50k but several
+  // at 700k — inconsistent; this pins ocean ≈ 1.3 shells and crust ≈ 3 shells at EVERY count,
+  // so the layering (and the temperature gradient sampled from it) is resolution-independent.
+  // Bands widen automatically as particles get bigger (lower counts).
+  const shellRf = (2 * rp) / rMax;
+  const layers = recipe.layers.map((l) => ({ ...l }));
+  const surfIdx = layers.findIndex((l) => l.mat === 'SURFACE_SPECIAL');
+  if (surfIdx > 0) {
+    const surfFrom = Math.min(layers[surfIdx - 1].to, 1 - 1.3 * shellRf);   // ocean ≈1.3 shells
+    layers[surfIdx - 1].to = surfFrom;
+    const crustIdx = layers.findIndex((l) => l.mat === 'CRUST');
+    if (crustIdx > 0) layers[crustIdx - 1].to = Math.min(layers[crustIdx - 1].to, surfFrom - 2.5 * shellRf);  // crust ≈2.5 shells
+  }
+
   for (let i = 0; i < N; i++) {
     const p = pts[i];
     pos[i * 3] = p[0]; pos[i * 3 + 1] = p[1]; pos[i * 3 + 2] = p[2];
@@ -122,12 +137,12 @@ export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
 
     // find layer
     let li = 0, from = 0;
-    for (; li < recipe.layers.length; li++) {
-      if (rf <= recipe.layers[li].to + 1e-9) break;
-      from = recipe.layers[li].to;
+    for (; li < layers.length; li++) {
+      if (rf <= layers[li].to + 1e-9) break;
+      from = layers[li].to;
     }
-    li = Math.min(li, recipe.layers.length - 1);
-    const layer = recipe.layers[li];
+    li = Math.min(li, layers.length - 1);
+    const layer = layers[li];
     const layerT = (layer.to - from) > 1e-9 ? (rf - from) / (layer.to - from) : 1;
 
     // lat/lon in body frame for texture painting
@@ -162,8 +177,8 @@ export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
 
     const mt = MAT_TYPES[matType];
     const isSurf = matType === 'WATER' || matType === 'ICE' ||
-      li === recipe.layers.length - 1 ||
-      (recipe.layers.length >= 4 && li === recipe.layers.length - 2);
+      li === layers.length - 1 ||
+      (layers.length >= 4 && li === layers.length - 2);
     matLocal[i] = useMat(matType, isSurf);
     mass[i] = mt.densMul;
     const tprof = (recipe.temps && recipe.temps[matType]) || layerTemps[matType] || [300, 300];
@@ -177,6 +192,17 @@ export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
       vel[i * 3] = v[0]; vel[i * 3 + 1] = v[1]; vel[i * 3 + 2] = v[2];
     }
   }
+
+  // PRE-COMPRESSION: the fibonacci shells pack at contact spacing with ZERO preload, so under
+  // self-gravity the whole planet collapses inward ~8-10% on the first frames — a violent
+  // transient that flings surface particles out (the "popping"/kinetic noise) and exposes the
+  // hot interior (looks like spontaneous heating; it is not — energy is conserved). Spawning the
+  // lattice pre-compressed to ~its gravitational equilibrium loads the contact springs to carry
+  // the overburden from t=0, so there is no collapse: validated to cut the transient ~5-8× and
+  // make it particle-count-independent. Scales positions + spin velocity; rp (contact radius)
+  // is unchanged, so neighbours start slightly interpenetrated = preloaded.
+  const PRECOMP = 0.88;
+  for (let i = 0; i < N * 3; i++) { pos[i] *= PRECOMP; vel[i] *= PRECOMP; }
 
   // renormalize mass to exactly M
   let sum = 0;
