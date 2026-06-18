@@ -187,6 +187,9 @@ async function start() {
       }
       if (e.key === '[') { ui.setWarp(sim.warpUser / 2); }
       if (e.key === ']') { ui.setWarp(sim.warpUser * 2); }
+      if (e.key === ',') { ui.stepWarp(-1); }            // ◄ slower — one TIME preset down
+      if (e.key === '.') { ui.stepWarp(1); }             // ► faster — one TIME preset up
+      if (e.key === 'Enter') { sim.loadScenario(sim.scenarioId); ui.syncScenario(); }  // restart scenario
       if (e.key === 'h' || e.key === 'H') {
         const r = document.getElementById('ui-root');
         r.style.display = r.style.display === 'none' ? '' : 'none';

@@ -22,6 +22,16 @@ export class Sim {
     this.warpUser = 60;
     this.paused = false;
     this.autoSlow = true;
+    // Tunable sim knobs (set from the SYSTEM panel; relativistic/approach dials read live each
+    // tick, so they take effect without a rebuild — handy for wiggling the Lance into behaving).
+    //   wakeR    — particle SIM wakes when surface gap < wakeR · ΣR
+    //   fineR    — within fineR · ΣR a frozen impactor switches to small fixed steps
+    //   fineFrac — max frozen advance per frame, as a fraction of ΣR (tunnel-proofing)
+    //   slowWin  — relativistic slow-mo engages within this many seconds of contact
+    //   slowDiv  — slow-mo strength: target warp ≈ time-to-contact / slowDiv (lower = slower)
+    this.sys = { wakeR: 3, fineR: 14, fineFrac: 0.4, slowWin: 120, slowDiv: 5 };
+    this.settleMode = false;   // SYS-panel "Settle" diagnostic: run the planet live, shells off
+    this.relaxing = false;     // auto relax-to-equilibrium phase at scenario load
     this.view = {
       clouds: true, atmo: true, cityLights: true, orbits: true, trails: true,
       labels: true, belt: true, forceParticles: false, autoFrame: true, ejecta: true,
@@ -93,6 +103,9 @@ export class Sim {
     this.renderer.writeAim(new Float32Array(0), 0);
     this.trails = [];
     this.settleUntil = 3600;
+    this.relaxing = true;          // cool relax-to-equilibrium before the first freeze (no latent energy)
+    this._relaxR = 0;              // structural-radius tracker for relax convergence
+    this.frozen = false;
     // per-scenario view overrides (e.g. smash test hides orbit/belt clutter for a clean look)
     if (def.view) Object.assign(this.view, def.view);
 
@@ -393,8 +406,16 @@ export class Sim {
     // no-tunnel cap already bound every physics step regardless of how warp jumps.)
     this.warpSmooth = Math.max(0.02, this.warpUser);
 
+    // TWO DIALS for an approaching impactor, both in units of the pair's combined radii (ΣR):
+    //   FINE_STEP_R — within this gap the frozen cruise switches to SMALL steps: the impactor
+    //                 glides in smoothly and can't tunnel, but the particle SIM is still asleep
+    //                 (cheap — only the mirror is moving). FINE_STEP_FRAC = max advance/frame.
+    //   SIM_WAKE_R  — within this gap the particle SIMULATION starts (collision physics).
+    // Separating them lets the approach look smooth from far out while the expensive sim only
+    // ignites right before contact. SIM_WAKE_R < FINE_STEP_R.
+    const { fineR: FINE_STEP_R, fineFrac: FINE_STEP_FRAC, wakeR: SIM_WAKE_R } = this.sys;
     // proximity from mirror → dt limits + cinematic auto-slow
-    let minGap = 1e12, closing = 0, gapSumR = 1, tWakeMin = Infinity, tCloseMin = Infinity, clSoon = 0, wakeNow = false, nearWake = false;
+    let minGap = 1e12, closing = 0, gapSumR = 1, tWakeMin = Infinity, tCloseMin = Infinity, tFineMin = Infinity, clSoon = 0, wakeNow = false, nearWake = false;
     for (let i = 0; i < this.mirror.length; i++) {
       for (let j = i + 1; j < this.mirror.length; j++) {
         const a = this.mirror[i], b = this.mirror[j];
@@ -402,19 +423,19 @@ export class Sim {
         const d = vsub(b.pos, a.pos);
         const dist = vlen(d);
         const gap = dist - a.R - b.R;
+        const sumR = a.R + b.R;
         const vr = vsub(b.vel, a.vel);
         const cl = -vdot(vr, d) / Math.max(dist, 1e-6);
-        // WAKE RULE: start ticking when the surface-to-surface gap drops below ~1.5× the sum of
-        // both radii — i.e. roughly when the impactor is within its own diameter of the surface,
-        // giving a little runway before contact. Same simple geometric test for everyone, a 0.4c
-        // Lance and a drifting Moon alike. Evaluated over EVERY pair (the closest pair is often
-        // the non-closing Moon, which must not mask a distant fast closer). The frozen no-tunnel
-        // cap below keeps a hypervelocity closer from stepping past this shell.
-        const wg = 1.5 * (a.R + b.R);
+        // DIAL 2 — particle sim wakes (surface gap < SIM_WAKE_R · ΣR). Evaluated over EVERY pair
+        // (the closest pair is often the non-closing Moon, which must not mask a distant closer).
+        const wg = SIM_WAKE_R * sumR;
         if (gap < wg) wakeNow = true;
         if (gap < wg * 2) nearWake = true;              // hysteresis band: don't re-freeze at the line
         // soonest time-to-wake over every closing pair — the frozen cruise must never step past it
         if (cl > 1e-9) tWakeMin = Math.min(tWakeMin, (gap - wg) / cl);
+        // DIAL 1 — within FINE_STEP_R · ΣR, hold the frozen advance to FINE_STEP_FRAC · ΣR per
+        // frame so the impactor approaches smoothly (the cap is the time to cover that distance)
+        if (cl > 1e-9 && gap < FINE_STEP_R * sumR) tFineMin = Math.min(tFineMin, (FINE_STEP_FRAC * sumR) / cl);
         // soonest time-to-CONTACT — drives the cinematic slow-mo (time-based, so a 0.4c
         // closer two minutes out engages it even while the Moon is the closest pair)
         if (cl > 1e-9 && gap > 0 && gap / cl < tCloseMin) { tCloseMin = gap / cl; clSoon = cl; }
@@ -432,13 +453,13 @@ export class Sim {
     // often the non-closing Moon, which masked a 0.4c closer until two frames before impact).
     // Floor of 2× (was 120×) so ultrafast closers play their approach in fine-stepped frozen
     // slow-mo — the glint actually grows — at zero particle cost until the 2-radii wake shell.
-    if (this.autoSlow && ((closing > 1e-9 && minGap > 0 && minGap < 30 * gapSumR) || tCloseMin < 120)) {
+    if (this.autoSlow && ((closing > 1e-9 && minGap > 0 && minGap < 30 * gapSumR) || tCloseMin < this.sys.slowWin)) {
       // SPEED-AWARE floor: slow closers keep the classic 120x floor (Moonfall never grinds
       // to 2x, and the contact-rate hold picks up seamlessly from ~120x — no jump at the
       // hit). Fast closers scale down toward 2x for constant-ish on-screen approach speed:
       // a 0.4c lance at 2x still crosses the sky briskly.
       const floorW = clamp(1.2 / Math.max(clSoon, 1e-6), 2, 120);
-      warp = Math.min(warp, Math.max(floorW, tCloseMin / 5));
+      warp = Math.min(warp, Math.max(floorW, tCloseMin / this.sys.slowDiv));
     }
     // carnage in slow-mo — and HOLD it: once contact has happened, the cap stays for as long
     // as the live physics runs (no sudden post-impact fast-forward when the fine-dt throttle
@@ -455,14 +476,21 @@ export class Sim {
     const es0 = this.statsCache ? this.statsCache.bodies[0] : null;
     const dSunEarth = vlen(vadd(this.mirror[0].pos, this.anchor.pos));
     const surfT0adj = es0 && this.statsBase ? 288 + (es0.surfT - (this.statsBase.surfT[0] || 288)) : 288;
+    // SOLAR ROAST without dynamics: a planet plunging toward the Sun cooks toward the solar
+    // equilibrium temperature. Fold that into Earth's atmosphere temp so the FROZEN thermal
+    // kernel heats the surface (temps climb, the hot:… headlines fire, population dies) while
+    // the particle SIM stays asleep. A sun-plunge is planetary motion, not an impact — it must
+    // NOT wake the dynamics, or the suddenly-vapor-pressured surface blows the planet apart.
+    // At 1 AU this is ~279 K (= normal), so non-plunge scenarios are unaffected.
+    const solarTeq = 278.6 * Math.sqrt(149597.87 / Math.max(dSunEarth, 700));
+    const earthAtmT = Math.max(this.atmT || 288, solarTeq);
     // temperature/molten/boundLoss only count as disturbance AFTER a real event (contact,
-    // sun-plunge, anything touched) — same rule the heat gate uses. Before that they're
-    // spawn-settle artifacts (at 1M particles the loose ocean shell alone trips 1% boundLoss),
-    // and they were latching the sim LIVE through entire approach cruises for nothing.
+    // anything touched). Before that they're spawn-settle artifacts (at 1M particles the loose
+    // ocean shell alone trips 1% boundLoss). NOTE: sun proximity was here too and woke the sim
+    // on a sun-plunge — removed, so Icarus roasts via temperature alone and never explodes.
     const realEvent = this._heatArmed || this.contacts.size > 0 || this.mirror.some((b) => b.touched);
     const disturbed = this.contacts.size > 0 || this.dissolveGo ||
-      (realEvent && (surfT0adj > 400 || this.moltenDelta(0) > 0.01 || this.boundLoss(0) > 0.01)) ||
-      dSunEarth < 42000;
+      (realEvent && (surfT0adj > 400 || this.moltenDelta(0) > 0.01 || this.boundLoss(0) > 0.01));
     // aftermath sleep: when every body is mechanically at rest (per fresh readback), the
     // expensive dynamics can sleep even though "disturbed" — only heat keeps evolving
     const statsFresh = this.statsCache && (this.simTime - (this.statsCache.simTimeTag || 0)) < Math.max(1800, this.warpEff * 1.2);
@@ -483,6 +511,33 @@ export class Sim {
     // instead: identical behavior at 42k, proportionally finer steps at half a million particles.
     const dtCap = clamp(this.ps.dtStable * 5, 0.3, 8);
     if (this._wake && this.frozen) { this._wake = false; this.frozen = false; }
+    // SETTLE MODE (SYS panel diagnostic): force the planet live with the rigid hold released so it
+    // relaxes to equilibrium on screen (shells off). Never freezes while engaged.
+    if (this.settleMode && this.frozen) {
+      this.frozen = false;
+      for (const b of this.mirror) {
+        out.shifts.push({ slot: b.slot, dp: vsub(b.pos, b.freezePos || b.pos), dv: vsub(b.vel, b.freezeVel || b.vel) });
+      }
+    }
+    // AUTO-RELAX: a fresh scenario eases to its TRUE equilibrium COOL (heat off, rigid hold released)
+    // so the spawn-vs-equilibrium energy bleeds off as damped motion — THEN it freezes that SETTLED
+    // state below. Freezing the raw spawn instead pins latent collapse energy that the first impact
+    // unleashes globally (the "any touch detonates" bug). Exits the instant the lattice is at rest
+    // (cheap once packComp is dialed in), or a safety cap. Hidden behind the textured globe at load.
+    if (this.relaxing) {
+      this.frozen = false;
+      const eb = this.statsCache && this.statsCache.bodies[0];
+      // Exit on STRUCTURAL convergence, not rms: settle-drag zeroes velocity long before the
+      // positions reach equilibrium (measured — rms 0.004 still cooks on arm, the radius is still
+      // contracting). √(Iw/mass) is the planet's structural radius; when it stops shrinking, the
+      // lattice is truly at rest and arming releases nothing. Floor + hard cap as backstops.
+      if (eb && eb.mass > 0 && eb.count > 2) {
+        const rmsR = Math.sqrt((eb.Iw || 0) / eb.mass);
+        const settled = this._relaxR > 0 && Math.abs(rmsR - this._relaxR) / rmsR < 8e-5;
+        this._relaxR = rmsR;
+        if ((this.simTime > 400 && settled) || this.simTime > 12000) this.relaxing = false;
+      } else if (this.simTime > 12000) this.relaxing = false;
+    }
     if (this.frozen) {
       if (disturbed || wakeNow) {
         this.frozen = false;          // wake: hand the rigid offset back, resume live physics
@@ -490,7 +545,7 @@ export class Sim {
           out.shifts.push({ slot: b.slot, dp: vsub(b.pos, b.freezePos), dv: vsub(b.vel, b.freezeVel) });
         }
       }
-    } else if (!disturbed && (!nearWake || (!settling && allQuiet))) {
+    } else if (!this.settleMode && !this.relaxing && !disturbed && (!nearWake || (!settling && allQuiet))) {
       // NOTE: the settle window no longer blocks freezing when every body is far apart —
       // a scenario LOADS frozen (no visible churn at start, like cruise). The lattice
       // relaxes later during the live approach window, held rigid by settle drag.
@@ -551,12 +606,18 @@ export class Sim {
     }
     const liveCap = this.frozen ? 12 : (hyper ? 32 : Math.round(this._subBoost || 4));
     let want = warp * dtWallSim;
+    // Auto-relax advances at the full live budget (not the warp) so it converges in a frame or two,
+    // hidden behind the globe — otherwise a slow-warp scenario would relax for many real seconds.
+    if (this.relaxing && !this.settleMode) want = Math.max(want, liveCap * dtSubMax);
     // FROZEN NO-TUNNEL: cap the whole frame's advance at the time-to-reach-the-wake-shell, so
     // a hypervelocity closer lands ON the shell and wakes next tick instead of stepping through
     // it. The floor was 0.05 s — but at 0.4c that's a 6 Mm hop, big enough to skip the entire
     // shell and bury the Lance inside Earth before the sim ever ticked. A tiny floor (1e-4 s)
     // keeps progress without overshooting (≈12 km past the shell at 0.4c, negligible).
     if (this.frozen && isFinite(tWakeMin)) want = Math.min(want, Math.max(tWakeMin, 1e-4));
+    // DIAL 1 — fine-step approach: once inside FINE_STEP_R, cap the frozen advance so the
+    // impactor moves only FINE_STEP_FRAC·ΣR per frame (smooth, tunnel-proof) while still asleep.
+    if (this.frozen && isFinite(tFineMin)) want = Math.min(want, Math.max(tFineMin, 1e-4));
     let substeps = clamp(Math.ceil(want / dtSubMax), 1, liveCap);
     let dtSub = Math.min(want / substeps, dtSubMax);
     const simDt = dtSub * substeps;
@@ -709,7 +770,7 @@ export class Sim {
       }
       this.ps.writeBodyDyn(this.mirror.map((b) => ({
         slot: b.slot, vel: b.vel, pos: b.pos, spin: b.spin,
-        atmT: b.slot === 0 ? (this.atmT || 288) : 0,
+        atmT: b.slot === 0 ? earthAtmT : 0,
       })));
       this.ps.writeParams({
         dt: simDt, settleBoost: 1, sunPos: vscale(this.anchor.pos, -1), gmSun: GM_SUN,
@@ -723,7 +784,7 @@ export class Sim {
     } else {
       this.ps.writeBodyDyn(this.mirror.map((b) => ({
         slot: b.slot, vel: b.vel, pos: b.pos, spin: b.spin,
-        atmT: b.slot === 0 ? (this.atmT || 288) : 0,
+        atmT: b.slot === 0 ? earthAtmT : 0,
       })));
       this.ps.writeParams({
         dt: dtSub,
@@ -739,17 +800,21 @@ export class Sim {
         // It must NOT arm on boundLoss/molten/surfT, because at low density a coarse blob
         // churns slightly as it settles, and arming on that churn creates a self-amplifying
         // leak that boils the planet before anything hits it. Latches on so aftermath cooks.
+        // Settle mode stays COOL — a pure spatial relaxation. Heat is off so you watch the lattice
+        // find its resting shape (hold = good, collapse/fly-apart = bad) without cooking it.
         heatGate: (this.simTime > this.settleUntil && (this._heatArmed = this._heatArmed || this.contacts.size > 0 || dSunEarth < 42000)) ? 1 : 0,
         // A body that has NOT been hit by a real event stays locked to rigid-body motion (bulk
         // drift + spin), so its surface can't drift off and a coarse low-density blob can't shed
         // its skin. The instant a real impact arms heat, the drag releases and physics splashes
         // it freely. This replaces the old fixed settle window — calm planets just hold their shape.
+        // settle-drag (the damping that ends bulk movement) stays ON during relax/settle — releasing
+        // it (=0) is what let the lattice churn instead of dissipating. Only a real impact frees it.
         settleDrag: (this._heatArmed || this.contacts.size > 0) ? 0 : 1 / 60,
         consumedMask: this.consumedMask || 0,
       });
       out.substeps = substeps;
       out.dtSub = dtSub;
-      out.readback = this.frame % 20 === 0;
+      out.readback = this.relaxing || this.frame % 20 === 0;   // fresh rmsV so relax exits on cue
     }
 
     // rebase if Earth wandered from origin
@@ -798,7 +863,7 @@ export class Sim {
   }
 
   _updateDissolve(dtWall) {
-    if (this.view.forceParticles) { this.dissolve = 1; return; }
+    if (this.view.forceParticles || this.settleMode) { this.dissolve = 1; return; }
     if (this.dissolveGo && this.dissolve < 1) this.dissolve = Math.min(1, this.dissolve + dtWall / 1.6);
   }
 
@@ -1163,7 +1228,7 @@ export class Sim {
     // "show particles" (forceParticles) means EXACTLY that: no globe, no shells, every body's
     // particles visible — so the hide-mask must be empty and the shells skipped below.
     let hideMask = 0;
-    if (!this.view.forceParticles) {
+    if (!this.view.forceParticles && !this.settleMode) {
       if (this.dissolve < 0.02) hideMask |= 1;
       for (const b of this.mirror) {
         if (b.slot > 0 && b.shellTex && b.shellFade > 0.9 && !b.consumed) hideMask |= (1 << b.slot);
@@ -1187,7 +1252,7 @@ export class Sim {
       const violated = b.touched || gapNear <= 0 ||
         (realEventNow && (this.moltenDelta(b.slot) > 0.01 || this.boundLoss(b.slot) > 0.02));
       if (violated && b.shellFade > 0) b.shellFade = Math.max(0, b.shellFade - dtWall / 0.9);
-      if (b.shellFade > 0.012 && !this.view.forceParticles) {
+      if (b.shellFade > 0.012 && !this.view.forceParticles && !this.settleMode) {
         // anchor the shell to the particle blob's actual center of mass (extrapolated forward
         // from the last readback by its COM velocity) so the textured sphere never separates
         // from the particles it represents

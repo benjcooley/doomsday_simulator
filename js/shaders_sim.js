@@ -165,7 +165,10 @@ ${nearGravity ? `          let invR = inverseSqrt(r2 + P.eps2);
             // the 150 m/s threshold, so the boiling-Earth bug cannot return through this gate.
             // band sits ABOVE settle churn (~0.25 km/s measured) so ordinary internal motion
             // stays damped; only genuine impact-speed material (>0.4 km/s) gets mobilized
-            let shockSoft = 1.0 - 0.93 * smoothstep(1.6e-7, 2.25e-6, dot(dv, dv)); // 0.4->1.5 km/s
+            // Only soften damping while heat is ARMED (a live impact, where ejecta must carry). When
+            // cool — cruise or a Settle relaxation — keep FULL damping so a fast collapse dissipates
+            // and the lattice converges to its resting shape instead of ringing forever.
+            let shockSoft = select(1.0, 1.0 - 0.93 * smoothstep(1.6e-7, 2.25e-6, dot(dv, dv)), P.heatGate > 0.5); // 0.4->1.5 km/s
             let cp = min(min(dampI, aux.w) * P.settleBoost, cMax) * shockSoft;
             dContacts = dContacts + 1.0;
             if (r < h * 1.08) { dTouch = dTouch + 1.0; }   // true touching neighbors (occlusion)

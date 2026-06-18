@@ -3,6 +3,26 @@ import { MAT_TYPES, RECIPES } from './bodies.js';
 import { sampleEquirect } from './gpu.js';
 import { vcross, vnorm, vsub, vscale, vdot } from './mathx.js';
 
+// Live-tunable spawn physics (set from the SYSTEM panel; applied on the next sim rebuild).
+//   volFudge — fractional change to the planet's BUILD volume. The lattice packs a few % inside
+//   the shell, so the particle ball reads smaller than the rendered globe (ejecta floats above it).
+//   This scales the build RADIUS (rp + spacing + positions together) so the planet grows as one
+//   intact, touching lattice — packing density unchanged, set independently by the particle count.
+//   It must NOT be a position-only stretch: that loosens the lattice into a gappy cloud that
+//   free-falls inward on the first impact and dumps the planet's binding energy as heat. + fills
+//   the shell, − shrinks. 0 = packed radius.
+//   interiorTempMul — scales the molten core+mantle SPAWN temperature. The interior is hot by
+//   design (mantle ~1950 K, core ~2050 K) so excavation glows orange — but an impact shock can
+//   shove it past the 2200 K conduction threshold and the lava then spreads globally. Lowering
+//   this gives headroom below that threshold (less "whole planet erupts" on a moderate hit). 1 = stock.
+//   packComp — packing compression, INDEPENDENT of volume + particle count. Scales the contact
+//   radius rp relative to the spacing without moving particles: + makes neighbours overlap at
+//   spawn (springs pre-loaded, the lattice pushes out and resists gravitational settling — dial up
+//   until the planet sits still in Settle mode); − leaves gaps (loose, free-falls/collapses). Too
+//   high stores energy that detonates on impact, so find the point where it neither settles nor
+//   explodes. 0 = neutral (just touching).
+export const PHYS = { volFudge: 0.0, interiorTempMul: 1.0, packComp: 0.0 };
+
 let _seed = 12345;
 function rnd() { _seed = (_seed * 1664525 + 1013904223) >>> 0; return _seed / 4294967296; }
 
@@ -69,9 +89,16 @@ function packAlbedo(r, g, b) {
 export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
   _seed = 1234567 + Math.round(R * 1000);
   const recipe = RECIPES[recipeName];
-  const { pts, spacing } = packSphere(R, targetCount);
+  // VOLUME FUDGE: build the lattice at a scaled radius so rp + spacing + positions grow together
+  // (one intact touching ball — NOT a loosened cloud). The returned R stays the catalog/shell
+  // radius (the real surface, which the now-larger ball reaches), so downstream physics — escape
+  // velocity, surface gravity, grid cell — stay consistent.
+  const Rb = R * Math.cbrt(1 + (PHYS.volFudge || 0));
+  const { pts, spacing } = packSphere(Rb, targetCount);
   const N = pts.length;
-  const rp = spacing / 2;
+  // rp = half the spacing (neighbours just touch). packComp scales it: >0 overlaps (pre-loaded
+  // springs that resist gravity), <0 gaps (loose). Independent of the build radius and count.
+  const rp = (spacing / 2) * (1 + (PHYS.packComp || 0));
   const pole = opts.pole || [0, 0, 1];
   const theta = opts.theta || 0;
   const [xe, ye, ze] = bodyBasis(pole, theta);
@@ -99,8 +126,9 @@ export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
   // interior temps deliberately capped BELOW the 2200K conduction threshold: still molten
   // (iron Tliq 1850), still glows orange when excavated, but pristine interiors can never
   // start a conductive thermal creep toward the surface — only impact heat conducts
+  const itm = PHYS.interiorTempMul;   // cools/heats the molten core+mantle only (SYSTEM panel)
   const layerTemps = {
-    IRON: [2050, 1750], ROCK: [1950, 1000], CRUST: [320, 288], WATER: [288, 288],
+    IRON: [2050 * itm, 1750 * itm], ROCK: [1950 * itm, 1000 * itm], CRUST: [320, 288], WATER: [288, 288],
     ICE: [255, 255], GAS: [2100, 165], LAVA: [1900, 1900],
   };
 
@@ -112,22 +140,7 @@ export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
     const rr = Math.hypot(p[0], p[1], p[2]);
     if (rr > rMax) rMax = rr;
   }
-  rMax = Math.max(rMax, R * 0.5);
-
-  // DEPTH-BASED surface/crust: define the ocean skin and the crust as a fixed PARTICLE-COUNT
-  // depth, not a fixed radius fraction. A radius-fraction crust is ~1 shell at 50k but several
-  // at 700k — inconsistent; this pins ocean ≈ 1.3 shells and crust ≈ 3 shells at EVERY count,
-  // so the layering (and the temperature gradient sampled from it) is resolution-independent.
-  // Bands widen automatically as particles get bigger (lower counts).
-  const shellRf = (2 * rp) / rMax;
-  const layers = recipe.layers.map((l) => ({ ...l }));
-  const surfIdx = layers.findIndex((l) => l.mat === 'SURFACE_SPECIAL');
-  if (surfIdx > 0) {
-    const surfFrom = Math.min(layers[surfIdx - 1].to, 1 - 1.3 * shellRf);   // ocean ≈1.3 shells
-    layers[surfIdx - 1].to = surfFrom;
-    const crustIdx = layers.findIndex((l) => l.mat === 'CRUST');
-    if (crustIdx > 0) layers[crustIdx - 1].to = Math.min(layers[crustIdx - 1].to, surfFrom - 2.5 * shellRf);  // crust ≈2.5 shells
-  }
+  rMax = Math.max(rMax, Rb * 0.5);
 
   for (let i = 0; i < N; i++) {
     const p = pts[i];
@@ -137,12 +150,12 @@ export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
 
     // find layer
     let li = 0, from = 0;
-    for (; li < layers.length; li++) {
-      if (rf <= layers[li].to + 1e-9) break;
-      from = layers[li].to;
+    for (; li < recipe.layers.length; li++) {
+      if (rf <= recipe.layers[li].to + 1e-9) break;
+      from = recipe.layers[li].to;
     }
-    li = Math.min(li, layers.length - 1);
-    const layer = layers[li];
+    li = Math.min(li, recipe.layers.length - 1);
+    const layer = recipe.layers[li];
     const layerT = (layer.to - from) > 1e-9 ? (rf - from) / (layer.to - from) : 1;
 
     // lat/lon in body frame for texture painting
@@ -177,8 +190,8 @@ export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
 
     const mt = MAT_TYPES[matType];
     const isSurf = matType === 'WATER' || matType === 'ICE' ||
-      li === layers.length - 1 ||
-      (layers.length >= 4 && li === layers.length - 2);
+      li === recipe.layers.length - 1 ||
+      (recipe.layers.length >= 4 && li === recipe.layers.length - 2);
     matLocal[i] = useMat(matType, isSurf);
     mass[i] = mt.densMul;
     const tprof = (recipe.temps && recipe.temps[matType]) || layerTemps[matType] || [300, 300];
@@ -192,17 +205,6 @@ export function buildBlob(recipeName, R, M, targetCount, opts = {}) {
       vel[i * 3] = v[0]; vel[i * 3 + 1] = v[1]; vel[i * 3 + 2] = v[2];
     }
   }
-
-  // PRE-COMPRESSION: the fibonacci shells pack at contact spacing with ZERO preload, so under
-  // self-gravity the whole planet collapses inward ~8-10% on the first frames — a violent
-  // transient that flings surface particles out (the "popping"/kinetic noise) and exposes the
-  // hot interior (looks like spontaneous heating; it is not — energy is conserved). Spawning the
-  // lattice pre-compressed to ~its gravitational equilibrium loads the contact springs to carry
-  // the overburden from t=0, so there is no collapse: validated to cut the transient ~5-8× and
-  // make it particle-count-independent. Scales positions + spin velocity; rp (contact radius)
-  // is unchanged, so neighbours start slightly interpenetrated = preloaded.
-  const PRECOMP = 0.88;
-  for (let i = 0; i < N * 3; i++) { pos[i] *= PRECOMP; vel[i] *= PRECOMP; }
 
   // renormalize mass to exactly M
   let sum = 0;

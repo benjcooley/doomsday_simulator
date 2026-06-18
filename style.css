@@ -45,6 +45,11 @@ html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-f
   border-radius: 8px; padding: 10px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
 }
 .drop-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.drop-hint { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--border);
+  font-size: 10px; color: var(--dim); text-align: center; letter-spacing: 0.5px; }
+.drop-hint kbd { display: inline-block; min-width: 14px; padding: 1px 4px; border-radius: 3px;
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  font-family: var(--mono); font-size: 10px; line-height: 1.4; }
 .tb-drop .time-dial, .tb-drop .slider { flex: 1; width: 100%; min-width: 170px; }
 .tb-drop .sval { min-width: 42px; text-align: right; }
 .btn.value { min-width: 72px; }
@@ -130,6 +135,9 @@ html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-f
 .slabel { font-size: 9px; color: var(--dim); letter-spacing: 1px; width: 88px; flex-shrink: 0; }
 .sval { font-size: 10px; color: var(--accent2); min-width: 58px; text-align: right; }
 .slider { flex: 1; min-width: 80px; accent-color: var(--accent); height: 14px; }
+.sys-hdr { font-size: 9px; color: var(--accent); letter-spacing: 1.5px; font-weight: 700;
+  margin: 13px 0 7px; padding-top: 9px; border-top: 1px solid var(--border); cursor: help; }
+.sys-apply { width: 100%; margin-top: 3px; }
 .num {
   width: 64px; background: var(--panel2); color: var(--text); border: 1px solid var(--border);
   border-radius: 4px; padding: 3px 5px; font-family: var(--mono); font-size: 11px;

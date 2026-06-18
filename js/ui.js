@@ -1,6 +1,7 @@
 // ui.js — DOM shell: topbar, sidebar (scenarios/lab/view), HUD, labels, banners, ticker
 import { SCENARIOS } from './scenarios.js';
-import { IMPACTORS, POP_2026 } from './bodies.js';
+import { IMPACTORS, POP_2026, MAT_TYPES } from './bodies.js';
+import { PHYS } from './blob.js';
 import { jdToDate, dateToJD } from './orbits.js';
 import { clamp, fmtInt, vlen, vsub } from './mathx.js';
 
@@ -91,6 +92,8 @@ export class UI {
     // While the user holds the dial it's authoritative; otherwise it tracks the MEASURED rate.
     this.dial.addEventListener('pointerdown', () => { this._dialDrag = true; });
     window.addEventListener('pointerup', () => { this._dialDrag = false; });
+    const wHint = this._el('div', 'drop-hint', wPanel);
+    wHint.innerHTML = '<kbd>,</kbd> slower &nbsp; <kbd>.</kbd> faster &nbsp; <kbd>[</kbd> <kbd>]</kbd> ½× / 2×';
 
     // --- DENSITY: a VALUE BUTTON showing the real particle count; the dropdown has three
     // machine-calibrated presets (mid = the GPU profiler's pick, ⅓ and 3× around it) and the
@@ -148,7 +151,8 @@ export class UI {
       sunLockBtn.classList.toggle('toggled', this.camera.sunLock);
     };
 
-    const resetBtn = this._el('button', 'btn danger', tb, 'RESET EARTH');
+    const resetBtn = this._el('button', 'btn danger', tb, 'RESET EARTH ↵');
+    resetBtn.title = 'Restart the current scenario from scratch (hotkey: Return)';
     resetBtn.onclick = () => this.cb.loadScenario(this.sim.scenarioId);
     this.fpsEl = this._el('div', 'fps', tb, '');
 
@@ -164,8 +168,8 @@ export class UI {
       collapseBtn.textContent = c ? '▶' : '◀';
     };
     const panels = {};
-    for (const t of ['SCENARIOS', 'LAB', 'VIEW']) {
-      const btn = this._el('button', 'tab', tabs, t === 'LAB' ? '☄ LAB' : t);
+    for (const t of ['SCENARIOS', 'LAB', 'VIEW', 'SYS']) {
+      const btn = this._el('button', 'tab', tabs, t === 'LAB' ? '☄ LAB' : t === 'SYS' ? '⚙ SYS' : t);
       const panel = this._el('div', 'panel', sb);
       panels[t] = { btn, panel };
       btn.onclick = () => {
@@ -295,6 +299,93 @@ export class UI {
     mkVS('Star brightness', 'starBoost', 0, 1.5, 0.05);
     // (particle density moved to the topbar DENSITY dropdown)
 
+    // ---- SYSTEM (internal physics knobs) ---------------------------------------------------
+    // A huge sim of millions of tiny particles behaves differently than the real-time one, so we
+    // expose the internal constants to wiggle until it looks right, then bake the values in.
+    // Spawn-time knobs (material, volume) only take effect on a fresh sim → Apply rebuilds.
+    // Approach/relativistic knobs read live each tick → they take effect immediately.
+    const sysw = panels.SYS.panel;
+    const sysHdr = this._el('div', 'sys-hdr', sysw, '⚙ SYSTEM — physics tuning');
+    sysHdr.title = 'Internal sim constants. Tune, then bake the good values into the defaults. '
+      + 'Material/volume changes need Apply (rebuild); approach/relativistic dials are live.';
+    const mkSys = (label, get, set, min, max, step, tip) => {
+      const row = this._el('div', 'srow', sysw);
+      const lab = this._el('span', 'slabel', row, label); lab.title = tip;
+      const out = this._el('span', 'sval', row, '');
+      const inp = this._el('input', 'slider', row);
+      inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step; inp.value = get(); inp.title = tip;
+      const upd = () => { out.textContent = (+inp.value).toFixed(2); set(+inp.value); };
+      inp.addEventListener('input', upd); upd();
+    };
+    const W = MAT_TYPES.WATER, ICE = MAT_TYPES.ICE, CR = MAT_TYPES.CRUST, RK = MAT_TYPES.ROCK;
+    // — spawn-time (Apply rebuilds) —
+    mkSys('Planet volume', () => PHYS.volFudge, (v) => (PHYS.volFudge = v), -0.3, 0.6, 0.02,
+      'Scales the planet’s build size so the particle ball fills the rendered shell (it packs a few '
+      + '% inside). Grows the lattice as one intact, touching ball (rp + spacing together) — '
+      + 'independent of particle count, and NOT a position-stretch, so it does not loosen the '
+      + 'lattice or generate the impact melt. + fills the shell, − shrinks. Rebuild.');
+    mkSys('Packing compression', () => PHYS.packComp, (v) => (PHYS.packComp = v), -0.1, 0.4, 0.01,
+      'Pre-loads the lattice springs (overlaps neighbours at spawn), independent of size and count. '
+      + 'Dial UP until the planet holds its size in Settle (barely moves) — the outward pressure '
+      + 'then balances gravity so it never collapses, which is what kills the impact melt. Too high '
+      + 'and it visibly expands/flies apart on Settle (stored energy that would detonate on impact); '
+      + '0 or − lets it collapse inward. Volume fills the shell, this stops the collapse — tune them '
+      + 'together with Settle. Rebuild.');
+    mkSys('Water cohesion', () => W.cohF, (v) => { W.cohF = v; ICE.cohF = v; }, 0, 0.5, 0.01,
+      'How solid the ocean is. Low = fluid (splashes, absorbs impacts, but jellies/creeps at rest). '
+      + 'High = rigid (holds shape but rings/transmits shock on impact). Rebuild.');
+    mkSys('Water damping', () => W.dampZ, (v) => { W.dampZ = v; ICE.dampZ = v; }, 0.3, 0.95, 0.05,
+      'Ocean shock absorption. High = soaks the impact up locally. Low = transmits the shock around '
+      + 'the whole globe (omnidirectional spallation). Rebuild.');
+    mkSys('Water density', () => W.densMul, (v) => { W.densMul = v; ICE.densMul = v; }, 0.3, 1.0, 0.02,
+      'Ocean particle mass vs crust (crust = 0.88). Lower = buoyant ocean bulging over land; '
+      + 'matched = flush sea level. Rebuild.');
+    mkSys('Crust cohesion', () => CR.cohF, (v) => (CR.cohF = v), 0, 0.6, 0.01,
+      'How solid the land/surface shell is. Higher resists cratering and at-rest collapse; too high '
+      + 'and the surface rings like a bell on impact. Rebuild.');
+    mkSys('Mantle cohesion', () => RK.cohF, (v) => (RK.cohF = v), 0, 0.6, 0.01,
+      'Interior rock cohesion — what holds the planet together at rest, especially at huge particle '
+      + 'counts where self-gravity wants to collapse it. Rebuild.');
+    mkSys('Mantle damping', () => RK.dampZ, (v) => (RK.dampZ = v), 0.3, 0.95, 0.05,
+      'Interior shock absorption. Higher soaks impact energy into heat instead of letting it '
+      + 'reverberate back out as global lava eruptions. Rebuild.');
+    mkSys('Interior temp', () => PHYS.interiorTempMul, (v) => (PHYS.interiorTempMul = v), 0.4, 1.2, 0.05,
+      'Scales the molten core+mantle spawn temperature. The lava you see on impact is the always-hot '
+      + 'interior showing through cracks — lower this for more headroom below the 2200K conduction '
+      + 'threshold, so a moderate hit cracks the lid without tipping the whole planet into lava. Rebuild.');
+    // — approach / relativistic (live) —
+    mkSys('Sim-wake dist', () => this.sim.sys.wakeR, (v) => (this.sim.sys.wakeR = v), 1, 8, 0.5,
+      'The particle COLLISION sim wakes when the surface gap drops below this × combined radii. '
+      + 'Bigger = ignites earlier (safer for fast impactors, costs more compute). Live.');
+    mkSys('Fine-step dist', () => this.sim.sys.fineR, (v) => (this.sim.sys.fineR = v), 4, 40, 1,
+      'A fast/relativistic impactor switches to small frozen time-steps within this × combined radii '
+      + 'so it cannot tunnel through Earth before the sim wakes. The Lance pre-impact dial. Live.');
+    mkSys('Fine-step frac', () => this.sim.sys.fineFrac, (v) => (this.sim.sys.fineFrac = v), 0.1, 1.0, 0.05,
+      'Max distance a frozen impactor advances per frame during fine-step approach, as a fraction of '
+      + 'combined radii. Smaller = smoother and tunnel-proof, but more frames. Live.');
+    mkSys('Slow-mo window', () => this.sim.sys.slowWin, (v) => (this.sim.sys.slowWin = v), 10, 400, 10,
+      'Relativistic cinematic slow-mo engages within this many seconds of contact (so the Lance’s '
+      + 'glint visibly grows on approach). Live.');
+    mkSys('Slow-mo strength', () => this.sim.sys.slowDiv, (v) => (this.sim.sys.slowDiv = v), 1, 20, 1,
+      'Slow-mo aggressiveness: on-screen warp ≈ time-to-contact / this. Lower = slower, more '
+      + 'dramatic approach. Live.');
+    const applyBtn = this._el('button', 'btn sys-apply', sysw, 'Apply — rebuild sim');
+    applyBtn.title = 'Re-spawn the current scenario from scratch (normal play, shells on) so the '
+      + 'spawn-time knobs above take effect. Approach/relativistic dials are already live.';
+    const settleBtn = this._el('button', 'btn sys-apply', sysw, 'Settle — watch (shells off)');
+    settleBtn.title = 'Rebuild with the current settings, drop the textured shells, and run the planet '
+      + 'live and COOL (no heat) so you watch the lattice find its resting shape. Holds its size = '
+      + 'stable; collapses inward or flies apart = bad. Heat only comes on later, on a real impact. '
+      + 'Click again to stop and restore shells.';
+    const setSettle = (on) => {
+      this.sim.settleMode = on;
+      settleBtn.classList.toggle('active', on);
+      settleBtn.textContent = on ? 'Settling… (click to stop)' : 'Settle — watch (shells off)';
+    };
+    // Both buttons rebuild from scratch first. Apply clears settle (normal play); Settle toggles it.
+    applyBtn.onclick = () => { setSettle(false); this.cb.loadScenario(this.sim.scenarioId); };
+    settleBtn.onclick = () => { setSettle(!this.sim.settleMode); this.cb.loadScenario(this.sim.scenarioId); };
+
     // ---- HUD ----
     const hud = this._el('div', 'hud');
     this.statusEl = this._el('div', 'hud-status ok', hud, 'ALL QUIET');
@@ -407,6 +498,22 @@ export class UI {
   setWarp(v) {
     this.sim.warpUser = Math.min(WMAX, Math.max(WMIN, v));
     this._syncWarpBtns();
+  }
+
+  // step to the next ( +1 ) or previous ( -1 ) TIME chip; snaps cleanly even when the dial has
+  // left the warp between presets. Bound to the . and , keys.
+  stepWarp(dir) {
+    const cur = this.sim.warpUser;
+    let target;
+    if (dir > 0) {
+      const up = WARP_CHIPS.find((w) => w.v > cur * 1.001);
+      target = up ? up.v : WARP_CHIPS[WARP_CHIPS.length - 1].v;
+    } else {
+      const below = WARP_CHIPS.filter((w) => w.v < cur * 0.999);
+      target = below.length ? below[below.length - 1].v : WARP_CHIPS[0].v;
+    }
+    this.sim.paused = false;
+    this.setWarp(target);
   }
 
   // value-button dropdown: panel opens under the button, closes on outside pointerdown,

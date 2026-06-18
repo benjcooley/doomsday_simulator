@@ -3,6 +3,15 @@
 
 export const SCENARIOS = [
   {
+    id: 'peaceful', title: 'Blue Marble', skulls: 0,
+    blurb: 'Earth, Moon, Sun. Nothing is wrong. Yet. Pick a date, spin the planet, enjoy it while it lasts.',
+    warp0: 60, focus: 'earth', camDist: 30,
+    headlines: [
+      { t: 5, text: 'Scientists confirm: everything fine, weirdly' },
+      { t: 60, text: 'Astronomers report "uncomfortable silence" from deep space' },
+    ],
+  },
+  {
     id: 'smash', title: 'Smash Test — Moon → Earth', skulls: 5,
     blurb: 'The Moon, dead center, gentle merger speed. Watch the goop, the ejecta rain, and the planet cook. (Press H to hide all chrome.)',
     warp0: 1200, focus: 'earth', camDist: 200, moon: 'none',
@@ -32,15 +41,6 @@ export const SCENARIOS = [
       { t: 2, text: 'Moon inbound at 30 km/s. This one is NOT a gentle merger.' },
       { cond: 'contact', text: 'EXCAVATION-CLASS IMPACT — crust departing at orbital velocity' },
       { cond: 'after:7200', text: 'Debris curtain circling the globe. New ring system pending.' },
-    ],
-  },
-  {
-    id: 'peaceful', title: 'Blue Marble', skulls: 0,
-    blurb: 'Earth, Moon, Sun. Nothing is wrong. Yet. Pick a date, spin the planet, enjoy it while it lasts.',
-    warp0: 60, focus: 'earth', camDist: 30,
-    headlines: [
-      { t: 5, text: 'Scientists confirm: everything fine, weirdly' },
-      { t: 60, text: 'Astronomers report "uncomfortable silence" from deep space' },
     ],
   },
   {
